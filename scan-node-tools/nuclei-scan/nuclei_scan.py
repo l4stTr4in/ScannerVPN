@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
-import argparse, subprocess, sys, json, os, requests
+import argparse, subprocess, sys, json, os, requests, logging
 from vpn_manager import VPNManager
+
+# Configure concise logger (match dns_lookup style)
+logger = logging.getLogger("nuclei")
+if not logger.handlers:
+    h = logging.StreamHandler(stream=sys.stdout)
+    h.setFormatter(logging.Formatter("[NUCLEI] %(levelname)s: %(message)s"))
+    logger.addHandler(h)
+    logger.setLevel(logging.INFO)
 
 SEV_ORDER = {"info":0, "low":1, "medium":2, "high":3, "critical":4}
 
@@ -90,7 +98,7 @@ def build_cmd(args, json_flag):
 #   --min-severity info 
 
 if __name__ == "__main__":
-    print("[*] Starting Nuclei scan with VPN...")
+    logger.info("Starting Nuclei scan with VPN...")
     
     # Setup VPN trước khi scan
     vpn_manager = VPNManager()
@@ -105,40 +113,39 @@ if __name__ == "__main__":
     if vpn_assignment:
         try:
             assigned_vpn = json.loads(vpn_assignment)
-            print(f"[*] Received VPN assignment from Controller: {assigned_vpn.get('hostname', 'Unknown')}")
+            logger.info("Received VPN assignment from Controller: %s", assigned_vpn.get('hostname', 'Unknown'))
         except json.JSONDecodeError as e:
-            print(f"[!] Failed to parse VPN assignment: {e}")
+            logger.error("Failed to parse VPN assignment: %s", e)
     
     # Thử setup VPN (optional - có thể skip nếu proxy server không available)
     vpn_profile_info = None
     try:
-        print("[*] Checking initial network status...")
+        logger.info("Checking initial network status...")
         initial_info = vpn_manager.get_network_info()
-        print(f"[*] Initial IP: {initial_info['public_ip']}")
+        logger.info("Initial IP: %s", initial_info.get('public_ip'))
 
         # Sử dụng assigned VPN nếu có, nếu không thì dùng random
         if assigned_vpn:
-            if vpn_manager.setup_specific_vpn(assigned_vpn):
-                print(f"[+] Connected to assigned VPN: {assigned_vpn.get('hostname', 'Unknown')}")
+            meta = vpn_manager.setup_specific_vpn(assigned_vpn)
+            if meta:
+                logger.info("Connected to assigned VPN: %s", meta.get('hostname', assigned_vpn.get('hostname', 'Unknown')))
                 vpn_manager.print_vpn_status()
                 network_info = vpn_manager.get_network_info()
                 vpn_connected = True
-                vpn_profile_info = assigned_vpn
+                vpn_profile_info = meta
             else:
-                print("[!] Failed to connect to assigned VPN, trying random...")
+                logger.warning("Failed to connect to assigned VPN, trying random...")
         if not vpn_connected:
-            print("[*] No VPN assignment from Controller or failed, using random VPN...")
-            if vpn_manager.setup_random_vpn():
-                print("[+] VPN setup completed!")
+            logger.info("No VPN assignment from Controller or failed, using random VPN...")
+            meta = vpn_manager.setup_random_vpn()
+            if meta:
+                logger.info("VPN setup completed!")
                 vpn_manager.print_vpn_status()
                 network_info = vpn_manager.get_network_info()
                 vpn_connected = True
-                vpn_profile_info = {
-                    "filename": network_info.get("vpn_filename", "random"),
-                    "hostname": network_info.get("vpn_hostname", "random")
-                }
+                vpn_profile_info = meta
             else:
-                print("[!] VPN connection failed, continuing without VPN...")
+                logger.warning("VPN connection failed, continuing without VPN...")
 
         # Gửi thông báo connect VPN về controller nếu kết nối thành công
         if vpn_connected and controller_url and vpn_profile_info:
@@ -149,13 +156,13 @@ if __name__ == "__main__":
                     "action": "connect",
                     "scanner_id": job_id
                 }
-                print(f"[+] Notify controller: connect {payload}")
+                logger.info("Notify controller: connect %s", payload)
                 resp = requests.post(f"{controller_url}/api/vpn_profiles/update", json=payload, timeout=10)
-                print(f"[+] Controller connect response: {resp.status_code}")
+                logger.info("Controller connect response: %s", resp.status_code)
             except Exception as notify_err:
-                print(f"[!] Failed to notify controller connect: {notify_err}")
+                logger.error("Failed to notify controller connect: %s", notify_err)
     except Exception as e:
-        print(f"[!] VPN setup error: {e}, continuing without VPN...")
+        logger.warning("VPN setup error: %s, continuing without VPN...", e)
 
 
     try:
@@ -234,14 +241,14 @@ if __name__ == "__main__":
         job_id = os.getenv("JOB_ID")
         workflow_id = os.getenv("WORKFLOW_ID")
         
-        print(f"[*] Starting Nuclei scan...")
-        print(f"[*] Job ID: {job_id}")
-        print(f"[*] Workflow ID: {workflow_id}")
+        logger.info("Starting Nuclei scan...")
+        logger.info("Job ID: %s", job_id)
+        logger.info("Workflow ID: %s", workflow_id)
         
         json_flag = pick_json_flag()
         cmd = build_cmd(args, json_flag)
         
-        print(f"[*] Running command: {' '.join(cmd)}")
+        logger.info("Running command: %s", ' '.join(cmd))
         
         # Chạy streaming, chỉ xử lý các dòng JSON hợp lệ
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
@@ -342,13 +349,13 @@ if __name__ == "__main__":
                             "total_findings": len(target_results)
                         }
                     }
-                    print(f"[*] Sending result to Controller for {target}: {len(target_results)} findings")
+                    logger.info("Sending result to Controller for %s: %s findings", target, len(target_results))
                     response = requests.post(f"{controller_url}/api/scan_results", json=payload, timeout=30)
-                    print(f"[*] Controller response: {response.status_code}")
+                    logger.info("Controller response: %s", response.status_code)
             except Exception as e:
-                print(f"[!] Error sending results to Controller: {e}")
-        
-        print(f"[*] Nuclei scan completed. Total findings: {len(scan_results)}")
+                logger.error("Error sending results to Controller: %s", e)
+
+        logger.info("Nuclei scan completed. Total findings: %s", len(scan_results))
         
     finally:
         # Gửi thông báo disconnect VPN về controller nếu đã connect VPN
@@ -360,14 +367,14 @@ if __name__ == "__main__":
                     "action": "disconnect",
                     "scanner_id": job_id
                 }
-                print(f"[+] Notify controller: disconnect {payload}")
+                logger.info("Notify controller: disconnect %s", payload)
                 resp = requests.post(f"{controller_url}/api/vpn_profiles/update", json=payload, timeout=10)
-                print(f"[+] Controller disconnect response: {resp.status_code}")
+                logger.info("Controller disconnect response: %s", resp.status_code)
             except Exception as notify_err:
-                print(f"[!] Failed to notify controller disconnect: {notify_err}")
+                logger.warning("Failed to notify controller disconnect: %s", notify_err)
         # Cleanup VPN
         if vpn_connected:
-            print("[*] Disconnecting VPN...")
+            logger.info("Disconnecting VPN...")
             vpn_manager.disconnect_vpn()
         # Cleanup temp files
         try:

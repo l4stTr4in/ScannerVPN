@@ -10,6 +10,7 @@ from .endpoints import (
     ai_advisor,
     ai_status,
     ip_pool,
+    settings,
 )
 
 api_router = APIRouter()
@@ -22,3 +23,4 @@ api_router.include_router(workflows.router)
 api_router.include_router(ai_advisor.router)
 api_router.include_router(ai_status.router)
 api_router.include_router(ip_pool.router)
+api_router.include_router(settings.router)

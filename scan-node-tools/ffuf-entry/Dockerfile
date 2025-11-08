@@ -31,6 +31,9 @@ WORKDIR /app
 COPY ffuf_entry.py /app/ffuf_entry.py
 COPY vpn_manager.py /app/vpn_manager.py
 
+# Copy wordlists to workdir for easy access
+COPY wordlists/ /app/
+
 RUN adduser -D -u 10001 scanner && chown -R scanner /app
 USER scanner
 

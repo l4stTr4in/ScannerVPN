@@ -10,7 +10,9 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY bf_runner.py /app/bf_runner.py
 
-# Thư mục mount wordlists (tùy bạn)
+# Copy wordlists to workdir for easy access
+COPY wordlists/ /app/
+
 VOLUME ["/wordlists"]
 
 ENV PYTHONUNBUFFERED=1

@@ -3,7 +3,16 @@ import subprocess, tempfile, os, xml.etree.ElementTree as ET
 import sys
 import json
 import requests
+import logging
 from vpn_manager import VPNManager
+
+# Configure concise logger (match dns_lookup style)
+logger = logging.getLogger("portscan")
+if not logger.handlers:
+    h = logging.StreamHandler(stream=sys.stdout)
+    h.setFormatter(logging.Formatter("[PORT] %(levelname)s: %(message)s"))
+    logger.addHandler(h)
+    logger.setLevel(logging.INFO)
 
 def scan(target, options=None):
     """
@@ -62,10 +71,10 @@ def scan(target, options=None):
             cmd = ['nmap', scan_type, '-p', str(ports), '-oX', temp_path, target]
         else:
             cmd = ['nmap', scan_type, '-p', str(ports), '-oX', temp_path, target]
-        print(f"[*] Running nmap command: {' '.join(cmd)} (timeout={timeout}s)")
+        logger.info("Running nmap command: %s (timeout=%ss)", ' '.join(cmd), timeout)
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
     except subprocess.TimeoutExpired:
-        print(f"[!] Nmap command timed out after {timeout}s: {' '.join(cmd)}")
+        logger.warning("Nmap command timed out after %s s: %s", timeout, ' '.join(cmd))
         # Fallback sang TCP connect scan (không cần root)
         try:
             if ports == "-":
@@ -81,18 +90,18 @@ def scan(target, options=None):
                 cmd = ['nmap', '-sT', '-p', str(ports), '-oX', temp_path, target]
             else:
                 cmd = ['nmap', '-sT', '-p', str(ports), '-oX', temp_path, target]
-            print(f"[*] Running fallback nmap command: {' '.join(cmd)} (timeout={timeout}s)")
+            logger.info("Running fallback nmap command: %s (timeout=%ss)", ' '.join(cmd), timeout)
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
         except subprocess.TimeoutExpired:
-            print(f"[!] Fallback nmap command timed out after {timeout}s: {' '.join(cmd)}")
+            logger.warning("Fallback nmap command timed out after %s s: %s", timeout, ' '.join(cmd))
             os.remove(temp_path)
             return {'open_ports': []}
         except Exception as e:
-            print(f"[!] Both scan methods failed: {e}")
+            logger.error("Both scan methods failed: %s", e)
             os.remove(temp_path)
             return {'open_ports': []}
     except subprocess.CalledProcessError as e:
-        print(f"[!] Nmap command failed: {e}")
+        logger.error("Nmap command failed: %s", e)
         # Fallback sang TCP connect scan (không cần root)
         try:
             if ports == "-":
@@ -108,14 +117,14 @@ def scan(target, options=None):
                 cmd = ['nmap', '-sT', '-p', str(ports), '-oX', temp_path, target]
             else:
                 cmd = ['nmap', '-sT', '-p', str(ports), '-oX', temp_path, target]
-            print(f"[*] Running fallback nmap command: {' '.join(cmd)} (timeout={timeout}s)")
+            logger.info("Running fallback nmap command: %s (timeout=%ss)", ' '.join(cmd), timeout)
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
         except subprocess.TimeoutExpired:
-            print(f"[!] Fallback nmap command timed out after {timeout}s: {' '.join(cmd)}")
+            logger.warning("Fallback nmap command timed out after %s s: %s", timeout, ' '.join(cmd))
             os.remove(temp_path)
             return {'open_ports': []}
         except Exception as e:
-            print(f"[!] Both scan methods failed: {e}")
+            logger.error("Both scan methods failed: %s", e)
             os.remove(temp_path)
             return {'open_ports': []}
 
@@ -137,16 +146,16 @@ def scan(target, options=None):
                     port_info["version"] = service.attrib.get('version', '')
                 ports_found.append(port_info)
         
-        print(f"[+] Found {len(ports_found)} open ports for {target}")
+        logger.info("Found %s open ports for %s", len(ports_found), target)
         return {'open_ports': ports_found}
     except Exception as e:
-        print(f"[!] Error parsing nmap XML: {e}")
+        logger.error("Error parsing nmap XML: %s", e)
         if os.path.exists(temp_path):
             os.remove(temp_path)
         return {'open_ports': []}
 
 if __name__ == "__main__":
-    print("[*] Starting Port scan with VPN...")
+    logger.info("Starting Port scan with VPN...")
     
     # Setup VPN trước khi scan
     vpn_manager = VPNManager()
@@ -161,41 +170,39 @@ if __name__ == "__main__":
     if vpn_assignment:
         try:
             assigned_vpn = json.loads(vpn_assignment)
-            print(f"[*] Received VPN assignment from Controller: {assigned_vpn.get('hostname', 'Unknown')}")
+            logger.info("Received VPN assignment from Controller: %s", assigned_vpn.get('hostname', 'Unknown'))
         except json.JSONDecodeError as e:
-            print(f"[!] Failed to parse VPN assignment: {e}")
+            logger.warning("Failed to parse VPN assignment: %s", e)
     
     # Thử setup VPN (optional - có thể skip nếu proxy server không available)
     vpn_profile_info = None
     try:
-        print("[*] Checking initial network status...")
+        logger.info("Checking initial network status...")
         initial_info = vpn_manager.get_network_info()
-        print(f"[*] Initial IP: {initial_info['public_ip']}")
+        logger.info("Initial IP: %s", initial_info.get('public_ip'))
 
         # Sử dụng assigned VPN nếu có, nếu không thì dùng random
         if assigned_vpn:
-            if vpn_manager.setup_specific_vpn(assigned_vpn):
-                print(f"[+] Connected to assigned VPN: {assigned_vpn.get('hostname', 'Unknown')}")
+            meta = vpn_manager.setup_specific_vpn(assigned_vpn)
+            if meta:
+                logger.info("Connected to assigned VPN: %s", meta.get('hostname', assigned_vpn.get('hostname', 'Unknown')))
                 vpn_manager.print_vpn_status()
                 network_info = vpn_manager.get_network_info()
                 vpn_connected = True
-                vpn_profile_info = assigned_vpn
+                vpn_profile_info = meta
             else:
-                print("[!] Failed to connect to assigned VPN, trying random...")
+                logger.warning("Failed to connect to assigned VPN, trying random...")
         if not vpn_connected:
-            print("[*] No VPN assignment from Controller or failed, using random VPN...")
-            if vpn_manager.setup_random_vpn():
-                print("[+] VPN setup completed!")
+            logger.info("No VPN assignment from Controller or failed, using random VPN...")
+            meta = vpn_manager.setup_random_vpn()
+            if meta:
+                logger.info("VPN setup completed!")
                 vpn_manager.print_vpn_status()
                 network_info = vpn_manager.get_network_info()
                 vpn_connected = True
-                # Tạo info tối thiểu cho random VPN (nếu có thể lấy được filename/hostname)
-                vpn_profile_info = {
-                    "filename": network_info.get("vpn_filename", "random"),
-                    "hostname": network_info.get("vpn_hostname", "random")
-                }
+                vpn_profile_info = meta
             else:
-                print("[!] VPN connection failed, continuing without VPN...")
+                logger.warning("VPN connection failed, continuing without VPN...")
 
         # Gửi thông báo connect VPN về controller nếu kết nối thành công
         if vpn_connected and controller_url and vpn_profile_info:
@@ -206,13 +213,13 @@ if __name__ == "__main__":
                     "action": "connect",
                     "scanner_id": job_id
                 }
-                print(f"[+] Notify controller: connect {payload}")
+                logger.info("Notify controller: connect %s", payload)
                 resp = requests.post(f"{controller_url}/api/vpn_profiles/update", json=payload, timeout=10)
-                print(f"[+] Controller connect response: {resp.status_code}")
+                logger.info("Controller connect response: %s", resp.status_code)
             except Exception as notify_err:
-                print(f"[!] Failed to notify controller connect: {notify_err}")
+                logger.warning("Failed to notify controller connect: %s", notify_err)
     except Exception as e:
-        print(f"[!] VPN setup error: {e}, continuing without VPN...")
+        logger.warning("VPN setup error: %s, continuing without VPN...", e)
     
     try:
         # Đọc targets và options từ environment variables
@@ -228,8 +235,8 @@ if __name__ == "__main__":
         except json.JSONDecodeError:
             options = {}
         
-        print(f"Port scan starting for targets: {targets}")
-        print(f"Options: {options}")
+        logger.info("Port scan starting for targets: %s", targets)
+        logger.info("Options: %s", options)
         
         # Scan từng target
         all_results = []
@@ -243,9 +250,9 @@ if __name__ == "__main__":
             # Nếu còn dấu / ở cuối, loại bỏ
             t = t.rstrip('/')
             if t:
-                print(f"Scanning {t}...")
+                logger.info("Scanning %s...", t)
                 result = scan(t, options)
-                print(f"Result for {t}: {len(result.get('open_ports', []))} open ports")
+                logger.info("Result for %s: %s open ports", t, len(result.get('open_ports', [])))
                 all_results.append({
                     "target": target.strip(),
                     "open_ports": result.get("open_ports", [])
@@ -272,13 +279,13 @@ if __name__ == "__main__":
                             "scan_options": options
                         }
                     }
-                    print(f"Sending result to Controller: {payload}")
+                    logger.info("Sending result to Controller: %s", json.dumps(payload))
                     response = requests.post(f"{controller_url}/api/scan_results", json=payload)
-                    print(f"Controller response: {response.status_code}")
+                    logger.info("Controller response: %s", response.status_code)
             except Exception as e:
-                print(f"Error sending results to Controller: {e}")
+                logger.error("Error sending results to Controller: %s", e)
         
-        print("Port scan completed")
+        logger.info("Port scan completed")
         
     finally:
         # Gửi thông báo disconnect VPN về controller nếu đã connect VPN
@@ -290,12 +297,12 @@ if __name__ == "__main__":
                     "action": "disconnect",
                     "scanner_id": job_id
                 }
-                print(f"[+] Notify controller: disconnect {payload}")
+                logger.info("Notify controller: disconnect %s", payload)
                 resp = requests.post(f"{controller_url}/api/vpn_profiles/update", json=payload, timeout=10)
-                print(f"[+] Controller disconnect response: {resp.status_code}")
+                logger.info("Controller disconnect response: %s", resp.status_code)
             except Exception as notify_err:
-                print(f"[!] Failed to notify controller disconnect: {notify_err}")
+                logger.warning("Failed to notify controller disconnect: %s", notify_err)
         # Cleanup VPN
         if vpn_connected:
-            print("[*] Disconnecting VPN...")
+            logger.info("Disconnecting VPN...")
             vpn_manager.disconnect_vpn()

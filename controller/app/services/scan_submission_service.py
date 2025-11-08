@@ -43,7 +43,7 @@ class ScanSubmissionService:
         }
 
         logger.info(f"Submitting job {job.job_id} to scanner node at {settings.SCANNER_NODE_URL}")
-        print(f"[DEBUG] Payload gửi sang scanner-node-api:")
+        logging.getLogger(__name__).debug("Payload gửi sang scanner-node-api:")
         print(payload)
 
         try:

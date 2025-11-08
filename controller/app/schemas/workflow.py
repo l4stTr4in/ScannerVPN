@@ -10,19 +10,20 @@ class WorkflowStep(BaseModel):
 class WorkflowRequest(BaseModel):
     workflow_id: Optional[str] = None
     workflow_phase: Optional[int] = None
+    parent_workflow_id: Optional[str] = None  # ID của workflow cha
     targets: List[str]
     strategy: str = "wide"
     steps: List[WorkflowStep]
-    vpn_profile: Optional[str] = None
-    country: Optional[str] = None
+    country: Optional[str] = None  # Chỉ giữ country preference
 
 class WorkflowJob(BaseModel):
     id: int
     workflow_id: str
+    parent_workflow_id: Optional[str] = None  # ID của workflow cha
     targets: List[str]
     strategy: str
     status: str
-    vpn_profile: Optional[str] = None
+    vpn_profile: Optional[str] = None  # Lưu VPN filename được assign
     vpn_country: Optional[str] = None
     vpn_assignment: Optional[Dict[str, Any]] = None
     total_steps: int

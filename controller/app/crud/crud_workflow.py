@@ -13,10 +13,10 @@ def create_workflow(db: Session, *, workflow_in: WorkflowRequest, workflow_id: s
     """Tạo một bản ghi workflow mới trong DB."""
     db_obj = WorkflowJob(
         workflow_id=workflow_id,
+        parent_workflow_id=getattr(workflow_in, 'parent_workflow_id', None),  # Set parent workflow
         targets=workflow_in.targets,
         strategy=workflow_in.strategy,
         total_steps=0,  # Sẽ được cập nhật sau khi tạo sub-jobs
-        vpn_profile=workflow_in.vpn_profile,
         vpn_country=workflow_in.country
     )
     db.add(db_obj)

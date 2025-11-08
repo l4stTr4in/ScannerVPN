@@ -6,6 +6,7 @@ from app import crud
 from app.services.workflow_service import WorkflowService
 from app.services.result_service import ResultService
 from app.api.deps import get_workflow_service, get_result_service, get_db
+from app.core.config import settings
 
 router = APIRouter()
 
@@ -70,3 +71,34 @@ def get_workflow_status(
     workflow_service: WorkflowService = Depends(get_workflow_service)
 ):
     return workflow_service.get_workflow_status(workflow_id=workflow_id)
+
+# Thêm endpoint: GET /api/workflows/{workflow_id}/chain-info
+@router.get("/api/workflows/{workflow_id}/chain-info", summary="Lấy thông tin về workflow chain và scanner limits")
+def get_workflow_chain_info(
+    workflow_id: str,
+    db: Session = Depends(get_db)
+):
+    from app.services.auto_workflow_service import AutoWorkflowService
+    auto_service = AutoWorkflowService(db)
+    
+    # Tìm root workflow
+    root_workflow_id = auto_service._find_root_workflow(workflow_id)
+    
+    # Lấy tất cả workflows trong chain
+    all_workflows = auto_service._get_all_workflows_in_chain(root_workflow_id)
+    
+    # Đếm scanners
+    total_scanners = auto_service._count_total_scanners_in_chain(root_workflow_id)
+    
+    # Kiểm tra limits
+    can_continue = auto_service._should_continue_workflow_chain(workflow_id)
+    
+    return {
+        "workflow_id": workflow_id,
+        "root_workflow_id": root_workflow_id,
+        "chain_workflows": all_workflows,
+        "total_scanners": total_scanners,
+        "max_scanners_limit": getattr(settings, 'MAX_TOTAL_SCANNERS_PER_WORKFLOW_CHAIN', 50),
+        "can_continue": can_continue,
+        "chain_depth": len(all_workflows)
+    }

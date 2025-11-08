@@ -8,6 +8,7 @@ class WorkflowJob(Base):
     __tablename__ = "workflow_jobs"
     id = Column(Integer, primary_key=True, index=True)
     workflow_id = Column(String, unique=True, index=True)
+    parent_workflow_id = Column(String, nullable=True, index=True)  # ID của workflow cha
     targets = Column(JSON)
     strategy = Column(String, default="wide")
     status = Column(String, default="pending")

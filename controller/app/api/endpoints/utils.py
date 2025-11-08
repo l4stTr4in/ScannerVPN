@@ -45,25 +45,6 @@ def list_supported_tools():
                     ]
                 },
                 {
-                    "name": "vpn_profile",
-                    "label": "VPN Profile",
-                    "component": "MultiSelect",
-                    "defaultValue": [
-                        "103.57.130.113.ovpn",
-                        "vpngate_61.255.180.199_tcp_1909",
-                        "vpngate_221.168.226.24_udp_1670.ovpn",
-                        "vpngate_106.155.167.26_tcp_1878.ovpn",
-                        "vpngate_42.115.224.83_udp_1457.ovpn"
-                    ],
-                    "data": [
-                        "103.57.130.113.ovpn",
-                        "vpngate_61.255.180.199_tcp_1909",
-                        "vpngate_221.168.226.24_udp_1670.ovpn",
-                        "vpngate_106.155.167.26_tcp_1878.ovpn",
-                        "vpngate_42.115.224.83_udp_1457.ovpn"
-                    ]
-                },
-                {
                     "name": "scan_type",
                     "label": "Loại scan",
                     "component": "Select",
@@ -141,12 +122,88 @@ def list_supported_tools():
         {
             "id": "wpscan-scan",
             "name": "Quét WordPress (WPScan)",
+            "description": "Quét bảo mật WordPress để phát hiện lỗ hổng, plugins và themes có vấn đề.",
             "fields": [
-                {"name": "enumerate", "label": "Phát hiện các thành phần", "component": "MultiSelect", "defaultValue": ["p", "t"], "data": [
-                    {"value": "p", "label": "Plugins (p)"},
-                    {"value": "t", "label": "Themes (t)"},
-                    {"value": "u", "label": "Users (u)"}
-                ]}
+                {
+                    "name": "api_token", 
+                    "label": "WPScan API Token", 
+                    "component": "TextInput", 
+                    "placeholder": "Nhập WPScan API token để có kết quả chi tiết hơn",
+                    "description": "API token từ https://wpscan.com/api để lấy thông tin vulnerability mới nhất"
+                },
+                {
+                    "name": "enumerate", 
+                    "label": "Phát hiện các thành phần", 
+                    "component": "MultiSelect", 
+                    "defaultValue": ["p", "t"], 
+                    "data": [
+                        {"value": "p", "label": "Plugins (p)"},
+                        {"value": "t", "label": "Themes (t)"},
+                        {"value": "u", "label": "Users (u)"}
+                    ]
+                },
+                {
+                    "name": "plugins-detection", 
+                    "label": "Mức độ phát hiện Plugins", 
+                    "component": "Select", 
+                    "defaultValue": "passive", 
+                    "data": [
+                        {"value": "passive", "label": "Passive - Không gây nhiễu"},
+                        {"value": "aggressive", "label": "Aggressive - Toàn diện hơn"}
+                    ]
+                },
+                {
+                    "name": "themes-detection", 
+                    "label": "Mức độ phát hiện Themes", 
+                    "component": "Select", 
+                    "defaultValue": "passive", 
+                    "data": [
+                        {"value": "passive", "label": "Passive - Không gây nhiễu"},
+                        {"value": "aggressive", "label": "Aggressive - Toàn diện hơn"}
+                    ]
+                },
+                {
+                    "name": "disable-tls-checks", 
+                    "label": "Bỏ qua kiểm tra TLS", 
+                    "component": "Switch", 
+                    "defaultValue": False,
+                    "description": "Hữu ích khi target có certificate tự ký"
+                },
+                {
+                    "name": "force", 
+                    "label": "Force scan", 
+                    "component": "Switch", 
+                    "defaultValue": False,
+                    "description": "Bắt buộc scan ngay cả khi không phát hiện WordPress"
+                },
+                {
+                    "name": "max-threads", 
+                    "label": "Max Threads", 
+                    "component": "NumberInput", 
+                    "defaultValue": 5,
+                    "description": "Số thread tối đa cho scan (1-50)"
+                },
+                {
+                    "name": "request-timeout", 
+                    "label": "Request Timeout (s)", 
+                    "component": "NumberInput", 
+                    "defaultValue": 60,
+                    "description": "Timeout cho mỗi HTTP request"
+                },
+                {
+                    "name": "connect-timeout", 
+                    "label": "Connect Timeout (s)", 
+                    "component": "NumberInput", 
+                    "defaultValue": 30,
+                    "description": "Timeout cho kết nối"
+                },
+                {
+                    "name": "user-agent", 
+                    "label": "Custom User-Agent", 
+                    "component": "TextInput", 
+                    "placeholder": "Override default random user-agent",
+                    "description": "User-Agent tùy chỉnh thay cho random"
+                }
             ]
         },
         {
@@ -189,25 +246,118 @@ def list_supported_tools():
             ]
             },
         {
-            "id": "bruteforce-scan",
+            "id": "bruteforce",
             "name": "Dò mật khẩu (Bruteforce)",
-            "description": "Thực hiện tấn công dò mật khẩu vào các dịch vụ HTTP, SSH, FTP.",
+            "description": "Thực hiện tấn công dò mật khẩu vào các dịch vụ HTTP, SSH, FTP. Có thể nhập thủ công hoặc sử dụng job.json từ FFUF.",
             "fields": [
-                {
-                    "name": "strategy", 
-                    "label": "Chiến lược tấn công", 
-                    "component": "Select", 
-                    "defaultValue": "dictionary",
-                    "data": [
-                        {"value": "dictionary", "label": "Dictionary (Một user - nhiều pass)"},
-                        {"value": "spray", "label": "Password Spraying (Một pass - nhiều user)"},
-                        {"value": "stuffing", "label": "Credential Stuffing (Cặp user:pass)"}
-                    ]
-                },
-                {"name": "concurrency", "label": "Số luồng (concurrency)", "component": "NumberInput", "defaultValue": 2},
-                {"name": "users_list", "label": "Danh sách Username", "component": "Textarea", "placeholder": "Nhập mỗi username một dòng..."},
-                {"name": "passwords_list", "label": "Danh sách Password", "component": "Textarea", "placeholder": "Nhập mỗi password một dòng..."},
-                {"name": "pairs_list", "label": "Danh sách cặp User:Pass", "component": "Textarea", "placeholder": "Nhập mỗi cặp user:pass một dòng..."}
+                # Input Mode Selection
+                {"name": "input_mode", "label": "Phương thức nhập liệu", "component": "Select", "defaultValue": "manual", "data": [
+                    {"value": "manual", "label": "Nhập thủ công"},
+                    {"value": "job_json", "label": "Sử dụng Job JSON từ FFUF"}
+                ]},
+                
+                # Job JSON Mode
+                {"name": "job_json_content", "label": "Nội dung Job JSON", "component": "Textarea", "placeholder": "Paste job.json content từ FFUF tool...", "conditional": {"field": "input_mode", "value": "job_json"}},
+                
+                # Manual Mode - Strategy
+                {"name": "strategy", "label": "Chiến lược tấn công", "component": "Select", "defaultValue": "dictionary", "data": [
+                    {"value": "dictionary", "label": "Dictionary (Một user - nhiều pass)"},
+                    {"value": "spray", "label": "Password Spraying (Một pass - nhiều user)"},
+                    {"value": "stuffing", "label": "Credential Stuffing (Cặp user:pass)"}
+                ], "conditional": {"field": "input_mode", "value": "manual"}},
+                
+                # Manual Mode - Protocol
+                {"name": "protocol", "label": "Giao thức", "component": "Select", "defaultValue": "http_form", "data": [
+                    {"value": "http_form", "label": "HTTP Form Login"},
+                    {"value": "ssh", "label": "SSH"},
+                    {"value": "ftp", "label": "FTP"}
+                ], "conditional": {"field": "input_mode", "value": "manual"}},
+                
+                # Manual Mode - Target Config for HTTP
+                {"name": "login_url", "label": "URL trang đăng nhập", "component": "TextInput", "placeholder": "https://example.com/login", "conditional": {"field": "protocol", "value": "http_form"}},
+                {"name": "username_field", "label": "Tên field username", "component": "TextInput", "defaultValue": "username", "placeholder": "username, email, user", "conditional": {"field": "protocol", "value": "http_form"}},
+                {"name": "password_field", "label": "Tên field password", "component": "TextInput", "defaultValue": "password", "placeholder": "password, pass, pwd", "conditional": {"field": "protocol", "value": "http_form"}},
+                {"name": "csrf_token_selector", "label": "CSS Selector cho CSRF token (optional)", "component": "TextInput", "placeholder": "input[name='_token']", "conditional": {"field": "protocol", "value": "http_form"}},
+                {"name": "success_indicator", "label": "Dấu hiệu đăng nhập thành công", "component": "Select", "defaultValue": "redirect", "data": [
+                    {"value": "redirect", "label": "Redirect (3xx status)"},
+                    {"value": "status_200", "label": "Status 200"},
+                    {"value": "body_contains", "label": "Body chứa text"},
+                    {"value": "cookie_set", "label": "Cookie được set"}
+                ], "conditional": {"field": "protocol", "value": "http_form"}},
+                {"name": "success_text", "label": "Text thành công (nếu chọn body_contains)", "component": "TextInput", "placeholder": "welcome, dashboard, success", "conditional": {"field": "success_indicator", "value": "body_contains"}},
+                
+                # Manual Mode - Performance Settings
+                {"name": "concurrency", "label": "Số luồng (concurrency)", "component": "NumberInput", "defaultValue": 2, "min": 1, "max": 10, "conditional": {"field": "input_mode", "value": "manual"}},
+                {"name": "rate_per_min", "label": "Tốc độ (requests/phút)", "component": "NumberInput", "defaultValue": 10, "min": 1, "max": 100, "conditional": {"field": "input_mode", "value": "manual"}},
+                {"name": "timeout_sec", "label": "Timeout (giây)", "component": "NumberInput", "defaultValue": 15, "min": 5, "max": 60, "conditional": {"field": "input_mode", "value": "manual"}},
+                {"name": "jitter_ms", "label": "Jitter (ms)", "component": "TextInput", "defaultValue": "100,300", "placeholder": "100,300", "conditional": {"field": "input_mode", "value": "manual"}},
+                {"name": "stop_on_success", "label": "Dừng khi tìm thấy credential", "component": "Switch", "defaultValue": True, "conditional": {"field": "input_mode", "value": "manual"}},
+                
+                # Manual Mode - Wordlist Source
+                {"name": "wordlist_source", "label": "Nguồn wordlist", "component": "Select", "defaultValue": "builtin", "data": [
+                    {"value": "builtin", "label": "Sử dụng wordlist có sẵn"},
+                    {"value": "custom", "label": "Nhập thủ công"}
+                ], "conditional": {"field": "input_mode", "value": "manual"}},
+                
+                # Manual Mode - Built-in Wordlists
+                {"name": "users_wordlist", "label": "Wordlist usernames", "component": "Select", "defaultValue": "users.txt", "data": [
+                    {"value": "users.txt", "label": "users.txt (82 usernames)"}
+                ], "conditional": {"field": "wordlist_source", "value": "builtin"}},
+                {"name": "passwords_wordlist", "label": "Wordlist passwords", "component": "Select", "defaultValue": "passwords.txt", "data": [
+                    {"value": "passwords.txt", "label": "passwords.txt (120+ passwords)"}
+                ], "conditional": {"field": "wordlist_source", "value": "builtin"}},
+                {"name": "pairs_wordlist", "label": "Wordlist user:pass pairs", "component": "Select", "defaultValue": "pairs.txt", "data": [
+                    {"value": "pairs.txt", "label": "pairs.txt (60+ combinations)"}
+                ], "conditional": {"field": "wordlist_source", "value": "builtin"}},
+                
+                # Manual Mode - Custom Input
+                {"name": "users_list", "label": "Danh sách Username", "component": "Textarea", "placeholder": "Nhập mỗi username một dòng...", "conditional": {"field": "wordlist_source", "value": "custom"}},
+                {"name": "passwords_list", "label": "Danh sách Password", "component": "Textarea", "placeholder": "Nhập mỗi password một dòng...", "conditional": {"field": "wordlist_source", "value": "custom"}},
+                {"name": "pairs_list", "label": "Danh sách cặp User:Pass", "component": "Textarea", "placeholder": "Nhập mỗi cặp user:pass một dòng...", "conditional": {"field": "wordlist_source", "value": "custom"}}
+            ]
+        },
+        {
+            "id": "ffuf-entry",
+            "name": "Tìm kiếm Login Form (FFUF)",
+            "description": "Sử dụng FFUF để tìm kiếm các endpoint login và tự động tạo profile cho bruteforce. Có thể chọn option emit_job để tự động tạo file job.json cho tool bruteforce sử dụng.",
+            "fields": [
+                {"name": "wordlist", "label": "Wordlist endpoints", "component": "Select", "defaultValue": "default", "data": [
+                    {"value": "default", "label": "Sử dụng wordlist mặc định"},
+                    {"value": "custom", "label": "Wordlist tùy chỉnh"}
+                ]},
+                {"name": "custom_wordlist", "label": "Wordlist tùy chỉnh", "component": "Select", "defaultValue": "common.txt", "data": [
+                    {"value": "common.txt", "label": "common.txt"},
+                    {"value": "admin-panels.txt", "label": "admin-panels.txt"}
+                ], "conditional": {"field": "wordlist", "value": "custom"}},
+                {"name": "rate", "label": "Tốc độ request/giây", "component": "NumberInput", "defaultValue": 50, "min": 1, "max": 200},
+                {"name": "threads", "label": "Số luồng FFUF", "component": "NumberInput", "defaultValue": 50, "min": 1, "max": 100},
+                {"name": "codes", "label": "HTTP status codes quan tâm", "component": "TagsInput", "defaultValue": ["200", "301", "302", "401", "403"], "placeholder": "200,301,302,401,403"},
+                {"name": "timeout", "label": "Timeout scan (giây)", "component": "NumberInput", "defaultValue": 60, "min": 10, "max": 300},
+                {"name": "insecure", "label": "Bỏ qua SSL verification", "component": "Switch", "defaultValue": False},
+                
+                # Emit Job Parameters cho Bruteforce
+                {"name": "emit_job", "label": "Tạo job.json sử dụng cho tool bruteforce", "component": "Switch", "defaultValue": True},
+                {"name": "users_wordlist", "label": "Wordlist usernames", "component": "Select", "defaultValue": "users.txt", "data": [
+                    {"value": "users.txt", "label": "users.txt"}
+                ], "conditional": {"field": "emit_job", "value": True}},
+                {"name": "passwords_wordlist", "label": "Wordlist passwords", "component": "Select", "defaultValue": "passwords.txt", "data": [
+                    {"value": "passwords.txt", "label": "passwords.txt"}
+                ], "conditional": {"field": "emit_job", "value": True}},
+                {"name": "pairs_wordlist", "label": "Wordlist user:pass pairs (optional)", "component": "Select", "defaultValue": "pairs.txt", "data": [
+                    {"value": "pairs.txt", "label": "pairs.txt"}
+                ], "conditional": {"field": "emit_job", "value": True}},
+                
+                # Bruteforce Strategy
+                {"name": "bf_strategy", "label": "Chiến lược bruteforce", "component": "Select", "defaultValue": "dictionary", "data": [
+                    {"value": "dictionary", "label": "Dictionary Attack"},
+                    {"value": "spray", "label": "Password Spraying"},
+                    {"value": "stuffing", "label": "Credential Stuffing"}
+                ], "conditional": {"field": "emit_job", "value": True}},
+                {"name": "bf_concurrency", "label": "Số luồng bruteforce", "component": "NumberInput", "defaultValue": 2, "min": 1, "max": 10, "conditional": {"field": "emit_job", "value": True}},
+                {"name": "bf_rate_per_min", "label": "Tốc độ bruteforce (req/phút)", "component": "NumberInput", "defaultValue": 10, "min": 1, "max": 100, "conditional": {"field": "emit_job", "value": True}},
+                {"name": "bf_jitter", "label": "Jitter (ms)", "component": "TextInput", "defaultValue": "100,300", "placeholder": "100,300", "conditional": {"field": "emit_job", "value": True}},
+                {"name": "bf_timeout_sec", "label": "Timeout bruteforce (giây)", "component": "NumberInput", "defaultValue": 15, "min": 5, "max": 60, "conditional": {"field": "emit_job", "value": True}},
+                {"name": "bf_stop_on_success", "label": "Dừng khi tìm thấy credential", "component": "Switch", "defaultValue": True, "conditional": {"field": "emit_job", "value": True}}
             ]
         }
     ]

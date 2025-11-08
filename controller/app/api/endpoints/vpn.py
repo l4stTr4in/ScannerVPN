@@ -49,3 +49,12 @@ async def get_vpns_by_country():
         return categorized
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/vpn_profiles/reset", summary="Reset all VPN profiles in DB to default idle state")
+def reset_vpn_profiles(db: Session = Depends(get_db)):
+    try:
+        count = vpn_service.reset_vpn_profiles(db)
+        return {"reset_count": count}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

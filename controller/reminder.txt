@@ -1,8 +1,0 @@
-# REMINDER - ScannerVPN Controller Workflow & RAG Integration
-
-2. Khi thêm sub-job mới vào workflow đã completed, cập nhật lại status workflow về 'running' và tăng total_steps.
-3. Đảm bảo các sub-job cũ không bị ghi đè/xóa khi thêm tool mới vào workflow.
-4. Khi gọi API tạo workflow, nếu có workflow_id thì chỉ thêm sub-job vào workflow đó.
-5. Đảm bảo trạng thái workflow luôn phản ánh đúng thực tế (pending, running, completed, ...).
-6. Khi sửa logic, kiểm tra lại các hàm tổng hợp trạng thái workflow/sub-job.
-7. **Thêm trường `workflow_phase` vào sub-job để phân biệt các sub-job được tạo ở lần gọi API/workflow thứ mấy.**

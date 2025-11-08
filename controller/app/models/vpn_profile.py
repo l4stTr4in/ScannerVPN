@@ -12,3 +12,6 @@ class VpnProfile(Base):
     country = Column(String, nullable=True)
     status = Column(String, default="idle")
     in_use_by = Column(PickleType, default=list)
+    # Reservation metadata
+    reserved_until = Column(String, nullable=True)
+    reserved_by = Column(String, nullable=True)

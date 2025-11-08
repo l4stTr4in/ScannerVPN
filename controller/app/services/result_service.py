@@ -46,8 +46,31 @@ class ResultService:
                         ScanJobModel.workflow_phase == current_phase
                     ).all()
                     if phase_jobs and all(j.status == "completed" for j in phase_jobs):
-                        # Chỉ trigger một lần cho phase này
-                        self._trigger_ai_analysis(job.workflow_id, job.job_id)
+                        # Chọn representative job cho AI analysis (prefer parent job hoặc first job)
+                        representative_job = None
+                        
+                        # Tìm parent job (job không có parent_job_id - là job gốc)
+                        parent_jobs = [j for j in phase_jobs if not j.parent_job_id]
+                        if parent_jobs:
+                            # Nếu có parent jobs, chọn cái có step_order nhỏ nhất
+                            representative_job = min(parent_jobs, key=lambda x: x.step_order or 0)
+                        else:
+                            # Nếu tất cả đều là sharded jobs, chọn job có step_order nhỏ nhất
+                            jobs_with_step_order = [j for j in phase_jobs if j.step_order is not None]
+                            if jobs_with_step_order:
+                                representative_job = min(jobs_with_step_order, key=lambda x: x.step_order)
+                            else:
+                                representative_job = phase_jobs[0]
+                        
+                        logging.getLogger(__name__).info(
+                            f"All {len(phase_jobs)} jobs in phase {current_phase} completed. "
+                            f"Triggering AI analysis with representative job: {representative_job.job_id} "
+                            f"(parent_job_id: {getattr(representative_job, 'parent_job_id', 'None')}, "
+                            f"step_order: {getattr(representative_job, 'step_order', 'None')})"
+                        )
+                        
+                        # Trigger với representative job (AI sẽ merge tất cả results)
+                        self._trigger_ai_analysis(job.workflow_id, representative_job.job_id)
 
         self.db.commit()
 
@@ -66,6 +89,8 @@ class ResultService:
             import threading
             
             def run_ai_analysis():
+                loop = None
+                thread_db = None
                 try:
                     # Tạo event loop mới cho thread
                     loop = asyncio.new_event_loop()
@@ -75,16 +100,22 @@ class ResultService:
                     from app.db.session import SessionLocal
                     thread_db = SessionLocal()
                     
-                    try:
-                        auto_service = AutoWorkflowService(thread_db)
-                        loop.run_until_complete(
-                            auto_service.analyze_and_suggest_next_steps(workflow_id, job_id)
-                        )
-                    finally:
-                        thread_db.close()
-                        loop.close()
+                    auto_service = AutoWorkflowService(thread_db)
+                    loop.run_until_complete(
+                        auto_service.analyze_and_suggest_next_steps(workflow_id, job_id)
+                    )
+                    
                 except Exception as e:
                     logging.getLogger(__name__).error(f"AI analysis thread failed: {e}", exc_info=True)
+                finally:
+                    # ✅ Proper cleanup to prevent memory leaks
+                    if thread_db:
+                        thread_db.close()
+                    if loop:
+                        try:
+                            loop.close()
+                        except Exception as cleanup_error:
+                            logging.getLogger(__name__).warning(f"Loop cleanup failed: {cleanup_error}")
             
           
             thread = threading.Thread(target=run_ai_analysis, daemon=True)
@@ -182,7 +213,7 @@ class ResultService:
         if not job:
             raise HTTPException(status_code=404, detail="Scan job not found")
 
-        print(f"[DEBUG] Job tool: {job.tool}, workflow_id: {job.workflow_id}")
+        logging.getLogger(__name__).debug(f"Job tool: {job.tool}, workflow_id: {job.workflow_id}")
         
         # Nếu là port-scan và thuộc workflow, thực hiện merge kết quả các sub-job cùng nhóm
         if job.tool == "port-scan" and job.workflow_id:
@@ -221,17 +252,17 @@ class ResultService:
             
         # Nếu là dirsearch-scan và thuộc workflow, thực hiện merge dirsearch_results của tất cả sub-job dirsearch-scan cùng workflow
         if job.tool == "dirsearch-scan" and job.workflow_id:
-            print(f"[DEBUG] Merging dirsearch results for workflow {job.workflow_id}")
+            logging.getLogger(__name__).debug(f"Merging dirsearch results for workflow {job.workflow_id}")
             sub_jobs = db.query(ScanJob).filter(
                 ScanJob.workflow_id == job.workflow_id,
                 ScanJob.tool == "dirsearch-scan"
             ).all()
-            print(f"[DEBUG] Found {len(sub_jobs)} dirsearch sub-jobs in workflow")
+            logging.getLogger(__name__).debug(f"Found {len(sub_jobs)} dirsearch sub-jobs in workflow")
             job_ids = [j.job_id for j in sub_jobs]
             scan_results = db.query(ScanResult).filter(
                 ScanResult.scan_metadata.op('->>')('job_id').in_(job_ids)
             ).all()
-            print(f"[DEBUG] Found {len(scan_results)} scan results to merge")
+            logging.getLogger(__name__).debug(f"Found {len(scan_results)} scan results to merge")
             # Merge dirsearch_results
             all_findings = []
             for r in scan_results:

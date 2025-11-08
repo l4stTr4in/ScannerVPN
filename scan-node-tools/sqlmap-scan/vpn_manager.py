@@ -4,6 +4,16 @@ import subprocess
 import os
 import time
 import sys
+import logging
+
+# Configure module logger to stdout so kubectl logs will show it
+logger = logging.getLogger("vpn_manager")
+if not logger.handlers:
+    handler = logging.StreamHandler(stream=sys.stdout)
+    formatter = logging.Formatter("[VPN] %(levelname)s: %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
 
 class VPNManager:
     def __init__(self, proxy_node="http://10.102.199.37:8000"):
@@ -17,7 +27,7 @@ class VPNManager:
             response.raise_for_status()
             return response.json()
         except Exception as e:
-            print(f"[VPN] Không lấy được danh sách VPN: {e}")
+            logger.warning(f"Không lấy được danh sách VPN: {e}")
             return []
     
     def download_vpn(self, filename):
@@ -28,111 +38,154 @@ class VPNManager:
             vpn_path = f"/tmp/{filename}"
             with open(vpn_path, "wb") as f:
                 f.write(r.content)
-            print(f"[VPN] Đã tải file cấu hình: {filename}")
+            # Restrict permissions for security
+            try:
+                os.chmod(vpn_path, 0o600)
+            except Exception:
+                logger.debug("Không thể chmod file VPN (ignore)")
+            logger.info(f"Đã tải file cấu hình: {filename}")
             return vpn_path
         except Exception as e:
-            print(f"[VPN] Lỗi tải file cấu hình {filename}: {e}")
+            logger.warning(f"Lỗi tải file cấu hình {filename}: {e}")
             return None
     
     def connect_vpn(self, vpn_file):
         """Kết nối VPN với network configuration"""
-        print(f"[VPN] Đang kết nối: {os.path.basename(vpn_file)}")
+        logger.info(f"Đang kết nối: {os.path.basename(vpn_file)}")
+        # Prepare openvpn command with resilience options
+        cmd = [
+            "openvpn", "--config", vpn_file,
+            "--data-ciphers", "AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305:AES-128-CBC",
+            "--redirect-gateway", "def1",
+            "--script-security", "2",
+            "--persist-key",
+            "--persist-tun",
+            "--auth-nocache",
+            "--verb", "3",
+            "--ping", "10",
+            "--ping-restart", "60",
+        ]
+
         try:
-            self.vpn_process = subprocess.Popen([
-                "openvpn", "--config", vpn_file,
-                "--data-ciphers", "AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305:AES-128-CBC",
-                "--redirect-gateway", "def1",
-                "--pull-filter", "ignore", "redirect-gateway",
-                "--pull-filter", "accept", "route",
-                "--script-security", "2",
-                "--verb", "3"
-            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            for _ in range(30):
-                if self.is_vpn_connected():
-                    print("[VPN] Đã kết nối thành công!")
-                    self._setup_vpn_routing()
-                    print("[VPN] Routing OK.")
-                    time.sleep(2)
-                    return True
-                time.sleep(1)
-            print("[VPN] Không thể kết nối (timeout)")
-            self.disconnect_vpn()
-            return False
+            # Start openvpn and monitor stdout for initialization completion
+            self.vpn_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            start = time.time()
+            timeout = 90
+            init_ok = False
+            # Read lines until we find success or timeout
+            while True:
+                if self.vpn_process.poll() is not None:
+                    # process exited unexpectedly
+                    out = self.vpn_process.stdout.read() if self.vpn_process.stdout else ""
+                    logger.warning("openvpn process exited early: %s", out.splitlines()[-1] if out else "(no output)")
+                    break
+                line = self.vpn_process.stdout.readline()
+                if line:
+                    # Only log important lines to avoid noise
+                    if "Initialization Sequence Completed" in line:
+                        init_ok = True
+                        logger.info("openvpn initialization completed")
+                        break
+                    # Debug log other lines at debug level
+                    logger.debug(line.strip())
+                if time.time() - start > timeout:
+                    logger.warning("Không thể kết nối (timeout waiting init)")
+                    break
+            if not init_ok:
+                self.disconnect_vpn()
+                return False
+            # Small wait for routes to be set up then verify
+            time.sleep(2)
+            try:
+                self._setup_vpn_routing()
+            except Exception:
+                logger.debug("_setup_vpn_routing failed (ignored)")
+            return True
         except Exception as e:
-            print(f"[VPN] Lỗi kết nối: {e}")
+            logger.exception(f"Lỗi khi chạy openvpn: {e}")
+            self.disconnect_vpn()
             return False
     
     def is_vpn_connected(self):
         """Kiểm tra VPN đã kết nối chưa"""
         try:
-            # Kiểm tra interface tun
-            result = subprocess.run(['ip', 'addr', 'show', 'tun0'], 
-                                  capture_output=True, text=True)
-            return result.returncode == 0
-        except:
+            # Check for any tun interface (tun0, tun1, ...)
+            result = subprocess.run(['ip', '-o', 'link', 'show'], capture_output=True, text=True)
+            if result.returncode != 0:
+                return False
+            for line in result.stdout.splitlines():
+                if line.startswith('tun') or ': tun' in line:
+                    return True
+            return False
+        except Exception:
             return False
     
     def _setup_vpn_routing(self):
         try:
-            result = subprocess.run(['ip', 'route', 'show', 'dev', 'tun0'], capture_output=True, text=True)
-            if result.returncode == 0 and result.stdout.strip():
+            result = subprocess.run(['ip', 'route', 'show'], capture_output=True, text=True)
+            if result.returncode == 0 and 'tun' in result.stdout:
+                # apply dns changes and cluster routes
                 self._setup_vpn_dns()
-                tun_routes = result.stdout.strip().split('\n')
-                vpn_gateway = None
-                for route in tun_routes:
-                    if 'via' in route:
-                        vpn_gateway = route.split('via')[1].split()[0]
-                        break
-                if vpn_gateway:
-                    subprocess.run(['ip', 'route', 'add', '10.244.0.0/16', 'via', '10.244.0.1', 'dev', 'eth0'], capture_output=True)
-                    subprocess.run(['ip', 'route', 'add', '10.96.0.0/12', 'via', '10.244.0.1', 'dev', 'eth0'], capture_output=True)
-                    for target in ["8.8.8.8", "8.8.4.4", "1.1.1.1", "142.250.0.0/16", "172.217.0.0/16"]:
-                        subprocess.run(['ip', 'route', 'add', target, 'via', vpn_gateway, 'dev', 'tun0'], capture_output=True)
-                # Chỉ log thành công hoặc lỗi chính
+                # best-effort add cluster routes (ignore errors)
+                subprocess.run(['ip', 'route', 'add', '10.244.0.0/16', 'via', '10.244.0.1', 'dev', 'eth0'], capture_output=True)
+                subprocess.run(['ip', 'route', 'add', '10.96.0.0/12', 'via', '10.244.0.1', 'dev', 'eth0'], capture_output=True)
             else:
-                print("[VPN] Không tìm thấy VPN gateway")
+                logger.debug("No tun route found yet")
         except Exception as e:
-            print(f"[VPN] Lỗi setup routing: {e}")
+            logger.debug(f"Lỗi setup routing: {e}")
     
     def _setup_vpn_dns(self):
         try:
-            subprocess.run(['cp', '/etc/resolv.conf', '/etc/resolv.conf.backup'], capture_output=True)
+            # Backup resolv.conf if present
+            try:
+                subprocess.run(['cp', '/etc/resolv.conf', '/etc/resolv.conf.backup'], capture_output=True)
+            except Exception:
+                logger.debug('Could not backup /etc/resolv.conf')
             original_dns = ""
             try:
                 with open('/etc/resolv.conf.backup', 'r') as f:
                     original_dns = f.read()
-            except:
-                pass
-            dns_config = """nameserver 10.96.0.10\nnameserver 8.8.8.8\nnameserver 8.8.4.4\n"""
-            if "nameserver 10.96.0.10" not in original_dns and "nameserver" in original_dns:
+            except Exception:
+                original_dns = ""
+            dns_config = """nameserver 10.96.0.10
+nameserver 8.8.8.8
+nameserver 8.8.4.4
+"""
+            # preserve any non-k8s nameservers from original
+            if "nameserver" in original_dns:
                 for line in original_dns.split('\n'):
                     if line.startswith('nameserver') and '10.96.0.10' not in line:
                         dns_config += line + '\n'
-            with open('/etc/resolv.conf', 'w') as f:
-                f.write(dns_config)
+            try:
+                with open('/etc/resolv.conf', 'w') as f:
+                    f.write(dns_config)
+            except Exception as e:
+                logger.debug(f'Could not write /etc/resolv.conf: {e}')
         except Exception as e:
-            print(f"[VPN] Lỗi setup DNS: {e}")
+            logger.debug(f"Lỗi setup DNS: {e}")
     
     def disconnect_vpn(self):
         """Ngắt kết nối VPN và restore DNS"""
         if self.vpn_process and self.vpn_process.poll() is None:
-            print("[VPN] Ngắt kết nối.")
-            self.vpn_process.terminate()
+            logger.info("Ngắt kết nối VPN")
             try:
+                self.vpn_process.terminate()
                 self.vpn_process.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 self.vpn_process.kill()
-            self.vpn_process = None
-            try:
-                subprocess.run(['mv', '/etc/resolv.conf.backup', '/etc/resolv.conf'], capture_output=True)
-            except:
-                pass
+            finally:
+                self.vpn_process = None
+        # restore resolv.conf if backup exists
+        try:
+            subprocess.run(['mv', '/etc/resolv.conf.backup', '/etc/resolv.conf'], capture_output=True)
+        except Exception:
+            pass
     
     def setup_specific_vpn(self, vpn_config):
         """Setup VPN từ config được assign từ Controller"""
         # Lấy IP ban đầu
         original_ip = self.get_current_ip()
-        print(f"[*] IP ban đầu: {original_ip}")
+        logger.debug(f"IP ban đầu: {original_ip}")
         
         # Kiểm tra môi trường container
         self._check_container_capabilities()
@@ -140,144 +193,118 @@ class VPNManager:
         # Extract filename from VPN config
         vpn_filename = vpn_config.get('filename')
         if not vpn_filename:
-            print("[!] VPN config missing filename")
+            logger.warning("VPN config missing filename")
             return False
-        
-        print(f"[+] Connecting to assigned VPN: {vpn_filename}")
-        print(f"    - Hostname: {vpn_config.get('hostname', 'Unknown')}")
-        print(f"    - Country: {vpn_config.get('country', 'Unknown')}")
-        
+
+        logger.info(f"Connecting to assigned VPN: {vpn_filename}")
+        logger.debug(f"    - Hostname: {vpn_config.get('hostname', 'Unknown')}")
+        logger.debug(f"    - Country: {vpn_config.get('country', 'Unknown')}")
+
         vpn_path = self.download_vpn(vpn_filename)
-        if vpn_path and self.connect_vpn(vpn_path):
-            # Kiểm tra IP sau khi kết nối
-            new_ip = self.get_current_ip()
-            print(f"[+] IP sau VPN: {new_ip}")
-            
-            # Kiểm tra VPN có hoạt động không
-            if self.is_vpn_working():
-                print(f"[+] Assigned VPN connected successfully! IP: {original_ip} -> {new_ip}")
-                return True
+        # Try with simple retry/backoff for assigned VPN and return metadata on success
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            if vpn_path and self.connect_vpn(vpn_path):
+                new_ip = self.get_current_ip()
+                logger.debug(f"IP after VPN: {new_ip}")
+                if self.is_vpn_working():
+                    logger.info(f"Assigned VPN connected")
+                    return {"filename": vpn_filename, "hostname": vpn_config.get("hostname")}
+                else:
+                    logger.debug("Assigned VPN connected but health check failed, disconnecting and retrying")
+                    self.disconnect_vpn()
             else:
-                print(f"[!] Assigned VPN not working properly")
-                self.disconnect_vpn()
-                return False
-        
-        print(f"[!] Failed to connect to assigned VPN: {vpn_filename}")
-        return False
+                logger.debug(f"connect_vpn returned False on attempt {attempt}")
+            # backoff
+            time.sleep(1 * attempt)
+        logger.debug(f"Failed to connect to assigned VPN after {max_attempts} attempts: {vpn_filename}")
+        return None
     
     def setup_random_vpn(self):
         """Setup VPN ngẫu nhiên"""
         # Lấy IP ban đầu
         original_ip = self.get_current_ip()
-        print(f"[*] IP ban đầu: {original_ip}")
+        logger.debug(f"IP ban đầu: {original_ip}")
         
         # Kiểm tra môi trường container
         self._check_container_capabilities()
         
         vpns = self.fetch_vpns()
         if not vpns:
-            print("[!] Không có VPN nào available")
+            logger.warning("Không có VPN nào available")
             return False
-            
-        # Thử tối đa 3 VPN ngẫu nhiên
-        for attempt in range(3):
+        # Try several different vpns with backoff and avoid immediate repeats
+        tried = set()
+        max_trials = min(6, len(vpns) * 2)
+        trial = 0
+        while trial < max_trials and len(tried) < len(vpns):
             chosen_vpn = random.choice(vpns)
-            print(f"[+] Thử VPN: {chosen_vpn} (lần {attempt + 1})")
-            
+            if chosen_vpn in tried:
+                trial += 1
+                continue
+            tried.add(chosen_vpn)
+            trial += 1
+            logger.info(f"Trying VPN: {chosen_vpn} ({trial}/{max_trials})")
             vpn_path = self.download_vpn(chosen_vpn)
-            if vpn_path and self.connect_vpn(vpn_path):
-                # Kiểm tra IP sau khi kết nối
-                new_ip = self.get_current_ip()
-                print(f"[+] IP sau VPN: {new_ip}")
-                
-                # Kiểm tra VPN có hoạt động không
-                if self.is_vpn_working():
-                    print(f"[+] VPN hoạt động tốt! IP: {original_ip} -> {new_ip}")
-                    return True
-                else:
-                    print(f"[!] VPN chưa hoạt động đúng, thử tiếp...")
-                    self.disconnect_vpn()
-                    continue
-                
-        print("[!] Không thể kết nối VPN nào")
-        return False
+            if not vpn_path:
+                logger.debug("download_vpn failed, continue")
+                time.sleep(1)
+                continue
+            # attempt connection with small retries
+            for attempt in range(1, 3):
+                if self.connect_vpn(vpn_path):
+                    new_ip = self.get_current_ip()
+                    logger.debug(f"IP after VPN: {new_ip}")
+                    if self.is_vpn_working():
+                        logger.info(f"VPN working: {chosen_vpn}")
+                        return {"filename": chosen_vpn, "hostname": None}
+                    else:
+                        logger.debug("VPN connected but not healthy, disconnecting")
+                        self.disconnect_vpn()
+                logger.debug(f"Attempt {attempt} failed for {chosen_vpn}")
+                time.sleep(attempt)
+            # small pause before next vpn
+            time.sleep(1)
+        logger.debug("Cannot connect to any VPN")
+        return None
     
     def _check_container_capabilities(self):
         """Kiểm tra khả năng networking của container"""
-        print("[*] Checking container networking capabilities...")
-        
+        logger.debug("Checking container networking capabilities")
         # Check if we can create TUN devices
         try:
             result = subprocess.run(['ls', '/dev/net/tun'], capture_output=True, text=True)
             tun_available = result.returncode == 0
-            print(f"[*] TUN device: {'✓' if tun_available else '✗'}")
-        except:
-            print("[*] TUN device: ✗")
-        
+            logger.debug(f"TUN device: {'Y' if tun_available else 'N'}")
+        except Exception:
+            logger.debug("TUN device: N")
         # Check NET_ADMIN capability
         try:
             result = subprocess.run(['ip', 'route', 'show'], capture_output=True, text=True)
             routing_ok = result.returncode == 0
-            print(f"[*] Routing access: {'✓' if routing_ok else '✗'}")
-        except:
-            print("[*] Routing access: ✗")
-        
+            logger.debug(f"Routing access: {'Y' if routing_ok else 'N'}")
+        except Exception:
+            logger.debug("Routing access: N")
         # Check external connectivity
         try:
-            result = subprocess.run(['ping', '-c', '1', '-W', '3', '8.8.8.8'], 
-                                  capture_output=True, text=True, timeout=5)
+            result = subprocess.run(['ping', '-c', '1', '-W', '3', '8.8.8.8'], capture_output=True, text=True, timeout=5)
             external_ok = result.returncode == 0
-            print(f"[*] External connectivity: {'✓' if external_ok else '✗'}")
-        except:
-            print("[*] External connectivity: ✗")
+            logger.debug(f"External connectivity: {'Y' if external_ok else 'N'}")
+        except Exception:
+            logger.debug("External connectivity: N")
     
     def is_vpn_working(self):
         """Kiểm tra VPN có thực sự hoạt động không - simplified version"""
-        checks = []
-        
-        # 1. Kiểm tra TUN interface
+        # lightweight health check: tun exists and routing has tun route
         tun_ok = self.is_vpn_connected()
-        checks.append(f"TUN interface: {'✓' if tun_ok else '✗'}")
-        
-        # 2. Kiểm tra có TUN interface trong routing
         route_ok = False
         try:
-            result = subprocess.run(['ip', 'route', 'show'], 
-                                  capture_output=True, text=True)
-            route_ok = 'tun0' in result.stdout
-            checks.append(f"VPN routing: {'✓' if route_ok else '✗'}")
-        except:
-            checks.append("VPN routing: ✗")
-        
-        # 3. Test ping qua VPN (simplified test)
-        connectivity_ok = False
-        try:
-            # Thử ping DNS server qua tun0
-            result = subprocess.run(['ping', '-I', 'tun0', '-c', '1', '-W', '3', '8.8.8.8'], 
-                                  capture_output=True, text=True, timeout=5)
-            connectivity_ok = result.returncode == 0
-            checks.append(f"VPN connectivity: {'✓' if connectivity_ok else '✗'}")
-        except:
-            checks.append("VPN connectivity: ✗")
-        
-        # 4. Simplified DNS test
-        dns_ok = False
-        try:
-            # Simple DNS test với timeout ngắn
-            import socket
-            socket.setdefaulttimeout(3)
-            socket.gethostbyname('google.com')
-            dns_ok = True
-            checks.append(f"DNS test: {'✓' if dns_ok else '✗'}")
-        except:
-            checks.append("DNS test: ✗")
-        finally:
-            socket.setdefaulttimeout(None)
-            
-        print(f"[*] VPN Health Check: {' | '.join(checks)}")
-        
-        # VPN được coi là working nếu có TUN interface và routing
-        # DNS và connectivity có thể fail do VPN server restrictions
+            result = subprocess.run(['ip', 'route', 'show'], capture_output=True, text=True)
+            route_ok = 'tun' in result.stdout
+        except Exception:
+            route_ok = False
+        # prefer to allow VPN even if ICMP/DNS blocked by server; require tun and route
+        logger.debug(f"VPN health: tun_ok={tun_ok} route_ok={route_ok}")
         return tun_ok and route_ok
     
     def get_current_ip(self):
@@ -285,7 +312,7 @@ class VPNManager:
         # Trước tiên thử get IP từ VPN interface
         vpn_ip = self._get_vpn_interface_ip()
         if vpn_ip:
-            print(f"[*] Detected VPN interface IP: {vpn_ip}")
+            logger.debug(f"Detected VPN interface IP: {vpn_ip}")
         
         # Thử các external services với timeout ngắn hơn
         external_methods = [
@@ -298,25 +325,25 @@ class VPNManager:
         
         for method, interface in external_methods:
             try:
-                print(f"[*] Trying IP detection via {interface}: {' '.join(method[:3])}")
+                logger.debug(f"Trying IP detection via {interface}: {' '.join(method[:3])}")
                 result = subprocess.run(method, capture_output=True, text=True, timeout=8)
                 if result.returncode == 0 and result.stdout.strip():
                     ip = result.stdout.strip()
                     if self._is_valid_ip(ip):
-                        print(f"[+] External IP detected: {ip}")
+                        logger.debug(f"External IP detected: {ip}")
                         return ip
                 else:
-                    print(f"[!] Method failed: {result.stderr.strip() if result.stderr else 'No output'}")
+                    logger.debug(f"Method failed: {result.stderr.strip() if result.stderr else 'No output'}")
             except subprocess.TimeoutExpired:
-                print(f"[!] Method timeout: {' '.join(method[:3])}")
+                logger.debug(f"Method timeout: {' '.join(method[:3])}")
                 continue
             except Exception as e:
-                print(f"[!] Method error: {e}")
+                logger.debug(f"Method error: {e}")
                 continue
         
         # If external detection fails, use VPN interface IP (this is actually the correct behavior)
         if vpn_ip:
-            print(f"[*] External detection failed, using VPN interface IP: {vpn_ip}")
+            logger.debug(f"External detection failed, using VPN interface IP: {vpn_ip}")
             return vpn_ip
                 
         # Last fallback: check local interface IPs
@@ -327,7 +354,7 @@ class VPNManager:
                 for ip in ips:
                     if self._is_valid_ip(ip) and not ip.startswith('127.') and not ip.startswith('10.244.'):
                         return ip
-        except:
+        except Exception:
             pass
             
         return "Unknown"
@@ -382,11 +409,11 @@ class VPNManager:
                 info["default_route"] = result.stdout.strip()
                 
         except Exception as e:
-            print(f"[!] Error getting network info: {e}")
+            logger.debug(f"Error getting network info: {e}")
             
         return info
     
     def print_vpn_status(self):
         info = self.get_network_info()
-        print(f"[VPN] Public IP: {info['public_ip']} | TUN: {'Y' if info['tun_interface'] else 'N'} | Local: {info['local_ip'] or '-'}")
+        logger.info(f"Public IP: {info['public_ip']} | TUN: {'Y' if info['tun_interface'] else 'N'} | Local: {info['local_ip'] or '-'}")
         return info

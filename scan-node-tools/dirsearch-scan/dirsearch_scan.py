@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
-import argparse, subprocess, sys, json, tempfile, re, os, requests
+import argparse, subprocess, sys, json, tempfile, re, os, requests, logging
 from vpn_manager import VPNManager
+
+# Configure concise logger
+logger = logging.getLogger("dirsearch")
+if not logger.handlers:
+    h = logging.StreamHandler(stream=sys.stdout)
+    h.setFormatter(logging.Formatter("[DIRSEARCH] %(levelname)s: %(message)s"))
+    logger.addHandler(h)
+    logger.setLevel(logging.INFO)
 
 def has_json_report():
     try:
@@ -31,7 +39,7 @@ def run(cmd):
 
 
 if __name__ == "__main__":
-    print("[*] Starting dirsearch scan with VPN...")
+    logger.info("Starting dirsearch scan with VPN...")
     # Setup VPN trước khi scan
     vpn_manager = VPNManager()
     vpn_connected = False
@@ -43,84 +51,75 @@ if __name__ == "__main__":
     if vpn_assignment:
         try:
             assigned_vpn = json.loads(vpn_assignment)
-            vpn_profile_info = assigned_vpn
-            print(f"[*] Received VPN assignment from Controller: {assigned_vpn.get('hostname', 'Unknown')}")
+            logger.info("Received VPN assignment from Controller: %s", assigned_vpn.get('hostname', 'Unknown'))
         except json.JSONDecodeError as e:
-            print(f"[!] Failed to parse VPN assignment: {e}")
+            logger.error("Failed to parse VPN assignment: %s", e)
     try:
         # ...existing VPN setup and scan logic...
-        print("[*] Checking initial network status...")
+        logger.info("Checking initial network status...")
         initial_info = vpn_manager.get_network_info()
-        print(f"[*] Initial IP: {initial_info['public_ip']}")
+        logger.info("Initial IP: %s", initial_info.get('public_ip'))
         if assigned_vpn:
-            if vpn_manager.setup_specific_vpn(assigned_vpn):
-                print(f"[+] Connected to assigned VPN: {assigned_vpn.get('hostname', 'Unknown')}")
+            meta = vpn_manager.setup_specific_vpn(assigned_vpn)
+            if meta:
+                logger.info("Connected to assigned VPN: %s", assigned_vpn.get('hostname', 'Unknown'))
                 vpn_manager.print_vpn_status()
                 network_info = vpn_manager.get_network_info()
                 vpn_connected = True
+                vpn_profile_info = meta
                 # Notify controller: connect
-                if controller_url and vpn_profile_info:
+                if controller_url:
                     try:
                         job_id = os.getenv("JOB_ID")
-                        payload = {
-                            "filename": vpn_profile_info.get("filename"),
-                            "action": "connect",
-                            "scanner_id": job_id
-                        }
-                        print(f"[+] Notify controller: connect {payload}")
+                        payload = {"action": "connect", "scanner_id": job_id}
+                        if vpn_profile_info.get("filename"):
+                            payload["filename"] = vpn_profile_info.get("filename")
+                        logger.info("Notify controller: connect %s", payload)
                         resp = requests.post(f"{controller_url}/api/vpn_profiles/update", json=payload, timeout=10)
-                        print(f"[+] Controller connect response: {resp.status_code}")
+                        logger.info("Controller connect response: %s", resp.status_code)
                     except Exception as notify_err:
-                        print(f"[!] Failed to notify controller connect: {notify_err}")
+                        logger.error("Failed to notify controller connect: %s", notify_err)
             else:
-                print("[!] Failed to connect to assigned VPN, trying random...")
-                if vpn_manager.setup_random_vpn():
-                    print("[+] Connected to random VPN as fallback!")
+                logger.warning("Failed to connect to assigned VPN, trying random...")
+                meta = vpn_manager.setup_random_vpn()
+                if meta:
+                    logger.info("Connected to random VPN as fallback!")
                     vpn_manager.print_vpn_status()
                     network_info = vpn_manager.get_network_info()
                     vpn_connected = True
                     # Notify controller: connect (random)
-                    vpn_profile_info = {
-                        "filename": network_info.get("vpn_filename", "random"),
-                        "hostname": network_info.get("vpn_hostname", "random")
-                    }
-                    if controller_url and vpn_profile_info:
+                    vpn_profile_info = meta
+                    if controller_url:
                         try:
                             job_id = os.getenv("JOB_ID")
-                            payload = {
-                                "filename": vpn_profile_info.get("filename"),
-                                "action": "connect",
-                                "scanner_id": job_id
-                            }
-                            print(f"[+] Notify controller: connect {payload}")
+                            payload = {"action": "connect", "scanner_id": job_id}
+                            if vpn_profile_info.get("filename"):
+                                payload["filename"] = vpn_profile_info.get("filename")
+                            logger.info("Notify controller: connect %s", payload)
                             resp = requests.post(f"{controller_url}/api/vpn_profiles/update", json=payload, timeout=10)
-                            print(f"[+] Controller connect response: {resp.status_code}")
+                            logger.info("Controller connect response: %s", resp.status_code)
                         except Exception as notify_err:
-                            print(f"[!] Failed to notify controller connect: {notify_err}")
+                            logger.error("Failed to notify controller connect: %s", notify_err)
         else:
-            print("[*] No VPN assignment from Controller, using random VPN...")
-            if vpn_manager.setup_random_vpn():
-                print("[+] VPN setup completed!")
+            logger.info("No VPN assignment from Controller, using random VPN...")
+            meta = vpn_manager.setup_random_vpn()
+            if meta:
+                logger.info("VPN setup completed!")
                 vpn_manager.print_vpn_status()
                 network_info = vpn_manager.get_network_info()
                 vpn_connected = True
-                vpn_profile_info = {
-                    "filename": network_info.get("vpn_filename", "random"),
-                    "hostname": network_info.get("vpn_hostname", "random")
-                }
-                if controller_url and vpn_profile_info:
+                vpn_profile_info = meta
+                if controller_url:
                     try:
                         job_id = os.getenv("JOB_ID")
-                        payload = {
-                            "filename": vpn_profile_info.get("filename"),
-                            "action": "connect",
-                            "scanner_id": job_id
-                        }
-                        print(f"[+] Notify controller: connect {payload}")
+                        payload = {"action": "connect", "scanner_id": job_id}
+                        if vpn_profile_info.get("filename"):
+                            payload["filename"] = vpn_profile_info.get("filename")
+                        logger.info("Notify controller: connect %s", payload)
                         resp = requests.post(f"{controller_url}/api/vpn_profiles/update", json=payload, timeout=10)
-                        print(f"[+] Controller connect response: {resp.status_code}")
+                        logger.info("Controller connect response: %s", resp.status_code)
                     except Exception as notify_err:
-                        print(f"[!] Failed to notify controller connect: {notify_err}")
+                        logger.error("Failed to notify controller connect: %s", notify_err)
 
         # --- Robust argument handling: convert positional/ENV targets to --url/--url-file ---
         targets_env = os.getenv("TARGETS", "").split(",") if os.getenv("TARGETS") else []
@@ -194,7 +193,7 @@ if __name__ == "__main__":
                     else:
                         new_argv.extend([arg_name, str(v)])
             except Exception as e:
-                print(f"[DEBUG] Failed to parse SCAN_OPTIONS env: {e}")
+                logger.debug("Failed to parse SCAN_OPTIONS env: %s", e)
 
         sys.argv = new_argv
 
@@ -212,22 +211,22 @@ if __name__ == "__main__":
         args = parser.parse_args()
 
         # Debug thông tin scan ngay sau khi parse args
-        print(f"[DEBUG] job_id: {os.getenv('JOB_ID')}")
-        print(f"[DEBUG] wordlist_path: {getattr(args, 'wordlist', None)}")
-        print(f"[DEBUG] wordlist_start: {getattr(args, 'wordlist_start', None)}")
-        print(f"[DEBUG] wordlist_end: {getattr(args, 'wordlist_end', None)}")
+        logger.debug("job_id: %s", os.getenv('JOB_ID'))
+        logger.debug("wordlist_path: %s", getattr(args, 'wordlist', None))
+        logger.debug("wordlist_start: %s", getattr(args, 'wordlist_start', None))
+        logger.debug("wordlist_end: %s", getattr(args, 'wordlist_end', None))
         try:
             if getattr(args, 'wordlist', None):
                 with open(args.wordlist, "r", encoding="utf-8", errors="ignore") as f:
                     debug_lines = f.readlines()
-                print(f"[DEBUG] wordlist_lines: {len(debug_lines)}")
+                logger.debug("wordlist_lines: %s", len(debug_lines))
         except Exception as e:
-            print(f"[DEBUG] wordlist read error: {e}")
-        print(f"[DEBUG] targets: {getattr(args, 'url', None) or getattr(args, 'url_file', None)}")
-        print(f"[DEBUG] threads: {getattr(args, 'threads', None)}")
-        print(f"[DEBUG] extensions: {getattr(args, 'extensions', None)}")
-        print(f"[DEBUG] include_status: {getattr(args, 'include_status', None)}")
-        print(f"[DEBUG] recursive: {getattr(args, 'recursive', None)}")
+            logger.debug("wordlist read error: %s", e)
+        logger.debug("targets: %s", getattr(args, 'url', None) or getattr(args, 'url_file', None))
+        logger.debug("threads: %s", getattr(args, 'threads', None))
+        logger.debug("extensions: %s", getattr(args, 'extensions', None))
+        logger.debug("include_status: %s", getattr(args, 'include_status', None))
+        logger.debug("recursive: %s", getattr(args, 'recursive', None))
 
         if not args.url and not args.url_file:
             print(json.dumps({"error":"missing --url or --url-file"})); sys.exit(2)
@@ -246,7 +245,7 @@ if __name__ == "__main__":
             with tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode="w", encoding="utf-8") as tf:
                 for idx, line in enumerate(subset):
                     tf.write(line)
-                    print(f"[SCAN] Chuẩn bị quét dòng {start + idx}: {line.strip()}")
+                    logger.info("Preparing to scan line %s: %s", start + idx, line.strip())
                 wordlist_path = tf.name
         # Prepare allowed_status for post-filtering
         # Lấy đúng tham số include_status từ request (params)
@@ -274,21 +273,21 @@ if __name__ == "__main__":
             base_cmd += ["-u", args.url]
 
         # Debug thông tin quét
-        print(f"[DEBUG] job_id: {os.getenv('JOB_ID')}")
-        print(f"[DEBUG] wordlist_path: {wordlist_path}")
-        print(f"[DEBUG] wordlist_start: {getattr(args, 'wordlist_start', None)}")
-        print(f"[DEBUG] wordlist_end: {getattr(args, 'wordlist_end', None)}")
+        logger.debug("job_id: %s", os.getenv('JOB_ID'))
+        logger.debug("wordlist_path: %s", wordlist_path)
+        logger.debug("wordlist_start: %s", getattr(args, 'wordlist_start', None))
+        logger.debug("wordlist_end: %s", getattr(args, 'wordlist_end', None))
         try:
             with open(wordlist_path, "r", encoding="utf-8", errors="ignore") as f:
                 debug_lines = f.readlines()
-            print(f"[DEBUG] wordlist_lines: {len(debug_lines)}")
+            logger.debug("wordlist_lines: %s", len(debug_lines))
         except Exception as e:
-            print(f"[DEBUG] wordlist read error: {e}")
-        print(f"[DEBUG] targets: {args.url or args.url_file}")
-        print(f"[DEBUG] threads: {args.threads}")
-        print(f"[DEBUG] extensions: {args.extensions}")
-        print(f"[DEBUG] include_status: {getattr(args, 'include_status', None)}")
-        print(f"[DEBUG] recursive: {args.recursive}")
+            logger.debug("wordlist read error: %s", e)
+        logger.debug("targets: %s", args.url or args.url_file)
+        logger.debug("threads: %s", args.threads)
+        logger.debug("extensions: %s", args.extensions)
+        logger.debug("include_status: %s", getattr(args, 'include_status', None))
+        logger.debug("recursive: %s", args.recursive)
 
         # Xác định danh sách target
         if args.url_file:
@@ -387,13 +386,13 @@ if __name__ == "__main__":
                             "total_findings": len(findings)
                         }
                     }
-                    print(f"[*] Sending result to Controller for {target_url}: {len(findings)} findings")
+                    logger.info("Sending result to Controller for %s: %s findings", target_url, len(findings))
                     response = requests.post(f"{controller_url}/api/scan_results", json=payload, timeout=30)
-                    print(f"[*] Controller response: {response.status_code}")
+                    logger.info("Controller response: %s", response.status_code)
                 except Exception as e:
-                    print(f"[!] Error sending results to Controller: {e}")
+                    logger.error("Error sending results to Controller: %s", e)
     except Exception as main_err:
-        print(f"[!] Unhandled error: {main_err}")
+        logger.exception("Unhandled error: %s", main_err)
     finally:
         # Notify controller: disconnect
         if vpn_connected and controller_url and vpn_profile_info:
@@ -404,13 +403,13 @@ if __name__ == "__main__":
                     "action": "disconnect",
                     "scanner_id": job_id
                 }
-                print(f"[+] Notify controller: disconnect {payload}")
+                logger.info("Notify controller: disconnect %s", payload)
                 resp = requests.post(f"{controller_url}/api/vpn_profiles/update", json=payload, timeout=10)
-                print(f"[+] Controller disconnect response: {resp.status_code}")
+                logger.info("Controller disconnect response: %s", resp.status_code)
             except Exception as notify_err:
-                print(f"[!] Failed to notify controller disconnect: {notify_err}")
+                logger.error("Failed to notify controller disconnect: %s", notify_err)
         if vpn_connected:
-            print("[*] Disconnecting VPN...")
+            logger.info("Disconnecting VPN...")
             vpn_manager.disconnect_vpn()
 
 

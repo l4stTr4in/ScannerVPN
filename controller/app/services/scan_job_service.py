@@ -24,27 +24,21 @@ class ScanJobService:
     async def _assign_vpn_to_job(self, job_in: scan_job_schema.ScanJobRequest) -> dict | None:
         """Gán VPN cho một job quét đơn lẻ."""
         try:
-            # Ưu tiên VPN do người dùng chỉ định
-            if job_in.vpn_profile:
-                all_vpns = await self.vpn_service.fetch_vpns()
-                if not all_vpns: return None
+            # ✅ Sử dụng available VPNs từ DB (idle/unreserved) thay vì fetch từ proxy
+            all_vpns = self.vpn_service.get_available_vpn_profiles(self.db)
+            if not all_vpns: return None
+            
+            # ✅ Auto-assign VPN dựa vào country preference (nếu có)
+            if job_in.country:
+                categorized = await self.vpn_service.categorize_vpns_by_country(all_vpns)
+                vpns_in_country = categorized.get(job_in.country.upper())
+                return self.vpn_service.get_random_vpn(vpns_in_country) if vpns_in_country else None
 
-                selected_vpn = next((v for v in all_vpns if v.get('filename') == job_in.vpn_profile), None)
-                if not selected_vpn:
-                    # Fallback nếu không tìm thấy profile
-                    return {"filename": job_in.vpn_profile, "country": job_in.country or "Unknown"}
-
-                vpn_assignment = selected_vpn.copy()
-                if job_in.country: vpn_assignment['country'] = job_in.country
-                return vpn_assignment
-
-            # Nếu không chỉ định, không gán VPN (để scanner-node tự chọn)
-            return None
+            # ✅ Fallback: random từ available VPNs
+            return self.vpn_service.get_random_vpn(all_vpns)
         except Exception as e:
             logger.warning(f"Failed to assign VPN for single scan: {e}")
             # Fallback an toàn nếu có lỗi
-            if job_in.vpn_profile:
-                return {"filename": job_in.vpn_profile, "country": job_in.country or "Unknown"}
             return None
 
     async def create_and_dispatch_scan(self, *, job_in: scan_job_schema.ScanJobRequest) -> ScanJob:
@@ -54,12 +48,13 @@ class ScanJobService:
         db_job = ScanJob(
             job_id=job_id, tool=job_in.tool, targets=job_in.targets,
             options=job_in.options, status="submitted",
-            vpn_profile=job_in.vpn_profile, vpn_country=job_in.country
+            vpn_country=job_in.country
         )
 
         vpn_assignment = await self._assign_vpn_to_job(job_in)
         db_job.vpn_assignment = vpn_assignment
         if vpn_assignment:
+            db_job.vpn_profile = vpn_assignment.get('filename')  # Set VPN filename được assign
             db_job.vpn_hostname = vpn_assignment.get('hostname')
             if not db_job.vpn_country: db_job.vpn_country = vpn_assignment.get('country')
 

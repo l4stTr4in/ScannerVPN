@@ -4,12 +4,121 @@ import os
 from typing import List, Dict, Optional
 from collections import defaultdict
 from app.core.config import settings # <--- Thêm import này
+from sqlalchemy.orm import Session
+from app.crud import crud_vpn_profile
+import logging
+from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
 
 
 class VPNService:
-    def get_available_vpn_profiles(self) -> List[Dict]:
-        """Trả về danh sách VPN chưa bị sử dụng (hiện tại trả về toàn bộ)."""
+    def get_available_vpn_profiles(self, db: Session | None = None) -> List[Dict]:
+        """Trả về danh sách VPN chưa bị sử dụng.
+
+        If a DB session is provided, prefer controller DB state and return only
+        profiles that are idle / not in use. Otherwise fall back to fetching
+        list from the proxy node.
+        """
+        # When controller DB is available, use it to avoid assigning VPNs
+        # that are already reserved/used according to controller state.
+        try:
+            if db is not None:
+                # release expired reservations first
+                try:
+                    self.release_expired_reservations(db)
+                except Exception:
+                    logger.exception("Error releasing expired VPN reservations")
+
+                vpn_objs = crud_vpn_profile.get_all(db)
+                vpns = []
+                now = datetime.utcnow()
+                for v in vpn_objs:
+                    # skip reserved and still-valid reservations
+                    reserved_until = getattr(v, 'reserved_until', None)
+                    if reserved_until:
+                        try:
+                            if isinstance(reserved_until, str):
+                                reserved_dt = datetime.fromisoformat(reserved_until)
+                            else:
+                                reserved_dt = reserved_until
+                        except Exception:
+                            reserved_dt = None
+                        if reserved_dt and reserved_dt > now:
+                            # still reserved -> skip
+                            continue
+
+                    # only include VPNs that are idle and not currently in use
+                    in_use = bool(getattr(v, 'in_use_by', None))
+                    status = getattr(v, 'status', None) or 'idle'
+                    if not in_use and status == 'idle':
+                        vpns.append({
+                            'filename': getattr(v, 'filename', None),
+                            'hostname': getattr(v, 'hostname', None),
+                            'ip': getattr(v, 'ip', None),
+                            'country': getattr(v, 'country', None),
+                            'status': status
+                        })
+                return vpns
+        except Exception:
+            # If anything goes wrong reading DB, fall back to proxy fetch
+            logger.exception("get_available_vpn_profiles: db read failed, falling back to proxy fetch")
+
         return self.fetch_vpns_sync()
+
+    def reserve_vpn_profile(self, filename: str, reserved_by: str, ttl_seconds: int, db: Session, force: bool = False) -> bool:
+        """Reserve a vpn profile in the controller DB until now + ttl_seconds.
+
+        Returns True when reservation succeeded, False otherwise.
+        """
+        if db is None:
+            logger.warning("reserve_vpn_profile called without db")
+            return False
+        try:
+            vpn = crud_vpn_profile.get_by_filename(db, filename=filename)
+            if not vpn:
+                logger.warning("reserve_vpn_profile: vpn not found %s", filename)
+                return False
+
+            # If already in use, cannot reserve unless caller forces
+            if vpn.in_use_by and not force:
+                logger.info("reserve_vpn_profile: vpn %s already in use: %s", filename, vpn.in_use_by)
+                return False
+
+            reserved_until = datetime.utcnow() + timedelta(seconds=ttl_seconds)
+            reserved_until_iso = reserved_until.isoformat()
+            success = crud_vpn_profile.set_reserved(db, filename=filename, reserved_by=reserved_by, reserved_until_iso=reserved_until_iso)
+            if success:
+                logger.info("Reserved vpn %s until %s for %s", filename, reserved_until_iso, reserved_by)
+            return success
+        except Exception:
+            logger.exception("reserve_vpn_profile failed for %s", filename)
+            return False
+
+    def release_expired_reservations(self, db: Session):
+        """Clear reservations that have expired (reserved_until <= now)."""
+        try:
+            now = datetime.utcnow()
+            vpn_objs = crud_vpn_profile.get_all(db)
+            for v in vpn_objs:
+                reserved_until = getattr(v, 'reserved_until', None)
+                if not reserved_until:
+                    continue
+                try:
+                    reserved_dt = datetime.fromisoformat(reserved_until) if isinstance(reserved_until, str) else reserved_until
+                except Exception:
+                    # malformed, clear it
+                    crud_vpn_profile.clear_reservation(db, v)
+                    continue
+                if reserved_dt <= now:
+                    crud_vpn_profile.clear_reservation(db, v)
+                    logger.info("Released expired reservation for %s", getattr(v, 'filename', '<unknown>'))
+        except Exception:
+            logger.exception("release_expired_reservations failed")
+
+    def reset_vpn_profiles(self, db: Session) -> int:
+        """Reset all vpn profiles in DB to default idle state. Returns count."""
+        return crud_vpn_profile.reset_all(db)
     """
     VPN Service cho Controller.
     

@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from fastapi import HTTPException
 import httpx
 
-from app.crud import crud_workflow, crud_scan_job
+from app.crud import crud_workflow, crud_scan_job, crud_vpn_profile
 from app.schemas import workflow as workflow_schema, scan_job as scan_job_schema
 from app.models.workflow_job import WorkflowJob
 from app.models.scan_job import ScanJob
@@ -66,7 +66,7 @@ class WorkflowService:
             "updated_at": getattr(workflow, "updated_at", None) or getattr(workflow, "timestamp", None),
             "created_at": getattr(workflow, "created_at", None) or getattr(workflow, "timestamp", None),
             "targets": getattr(workflow, "targets", []),
-            "vpn": getattr(workflow, "vpn_country", None) or getattr(workflow, "vpn_profile", None),
+            "vpn": getattr(workflow, "vpn_country", None),
             "total_phase": total_phase
         }
 
@@ -218,7 +218,7 @@ class WorkflowService:
             "dirsearch-scan": dirsearch_flatten,
             "wpscan-scan": wpscan_flatten,
             "sqlmap-scan": sqlmap_flatten,
-            "bruteforce-scan": bruteforce_flatten,
+            "bruteforce": bruteforce_flatten,
             "ffuf-entry": ffuf_flatten
         }
 
@@ -265,21 +265,18 @@ class WorkflowService:
     async def _assign_vpn_to_workflow(self, workflow_req: workflow_schema.WorkflowRequest) -> dict | None:
         """Gán VPN cho toàn bộ workflow."""
         try:
-            all_vpns = await self.vpn_service.fetch_vpns()
+            # Prefer controller DB state when selecting VPNs so we don't pick
+            # profiles that are already marked used/reserved in the controller.
+            all_vpns = self.vpn_service.get_available_vpn_profiles(self.db)
             if not all_vpns: return None
 
-            if workflow_req.vpn_profile:
-                selected_vpn = next((v for v in all_vpns if v.get('filename') == workflow_req.vpn_profile), None)
-                if not selected_vpn: return None
-                vpn_assignment = selected_vpn.copy()
-                if workflow_req.country: vpn_assignment['country'] = workflow_req.country
-                return vpn_assignment
-
+            # ✅ Auto-assign VPN dựa vào country preference (nếu có)
             if workflow_req.country:
                 categorized = await self.vpn_service.categorize_vpns_by_country(all_vpns)
                 vpns_in_country = categorized.get(workflow_req.country.upper())
                 return self.vpn_service.get_random_vpn(vpns_in_country) if vpns_in_country else None
 
+            # ✅ Fallback: auto-assign random idle VPN
             return self.vpn_service.get_random_vpn(all_vpns)
         except Exception as e:
             logger.warning(f"Failed to assign VPN for workflow: {e}")
@@ -321,9 +318,50 @@ class WorkflowService:
             current_phase = 1
 
         vpn_assignment = await self._assign_vpn_to_workflow(workflow_in)
+
+        # If assignment succeeded from available (idle/unreserved) pool, reserve it now
         if vpn_assignment:
-            crud_workflow.update(self.db, db_obj=workflow_db, obj_in={"vpn_assignment": vpn_assignment, "vpn_country": vpn_assignment.get('country')})
+            # Try to reserve in controller DB so other assignments won't pick it
+            try:
+                reserved = self.vpn_service.reserve_vpn_profile(
+                    vpn_assignment.get('filename'), f"workflow:{workflow_id}", settings.VPN_RESERVATION_TTL, self.db
+                )
+                if not reserved:
+                    logger.info("Failed to reserve VPN %s for workflow %s", vpn_assignment.get('filename'), workflow_id)
+            except Exception:
+                logger.exception("Error reserving vpn for workflow")
+
+            crud_workflow.update(self.db, db_obj=workflow_db, obj_in={
+                "vpn_assignment": vpn_assignment, 
+                "vpn_profile": vpn_assignment.get('filename'),
+                "vpn_country": vpn_assignment.get('country')
+            })
             logger.info(f"Assigned VPN {vpn_assignment.get('hostname')} to workflow {workflow_id}")
+        else:
+            # Fallback: if no idle/unreserved VPN available, allow assigning any (reserved/in-use) VPN
+            try:
+                all_profiles = crud_vpn_profile.get_all(self.db)
+                if all_profiles:
+                    # pick the first available in DB (could be improved to random/round-robin)
+                    chosen = all_profiles[0]
+                    vpn_assignment = {
+                        'filename': getattr(chosen, 'filename', None),
+                        'hostname': getattr(chosen, 'hostname', None),
+                        'country': getattr(chosen, 'country', None)
+                    }
+                    # Force reserve to avoid race (allow overriding in_use if necessary)
+                    try:
+                        self.vpn_service.reserve_vpn_profile(vpn_assignment.get('filename'), f"workflow:{workflow_id}", settings.VPN_RESERVATION_TTL, self.db, force=True)
+                    except Exception:
+                        logger.exception("Failed to force-reserve VPN during fallback assignment")
+                    crud_workflow.update(self.db, db_obj=workflow_db, obj_in={
+                        "vpn_assignment": vpn_assignment, 
+                        "vpn_profile": vpn_assignment.get('filename'),
+                        "vpn_country": vpn_assignment.get('country')
+                    })
+                    logger.info(f"Fallback-assigned VPN {vpn_assignment.get('hostname')} to workflow {workflow_id}")
+            except Exception:
+                logger.exception("Error during fallback vpn assignment")
 
         # Truyền workflow_phase khi tạo sub-job
         sub_jobs = self._create_sub_jobs_in_db(workflow_db, workflow_in.steps, vpn_assignment, workflow_phase=current_phase)
@@ -383,11 +421,80 @@ class WorkflowService:
         }
 
     def _create_sub_jobs_in_db(self, workflow_db: WorkflowJob, steps: list[workflow_schema.WorkflowStep], vpn_assignment: dict | None, workflow_phase: int = None) -> list[ScanJob]:
-        """Tạo các bản ghi sub-job trong DB, hỗ trợ chia nhỏ cho port-scan và xoay VPN profile."""
+        """Tạo các bản ghi sub-job trong DB, distribute idle VPNs cho từng sub-job."""
         import os
         from app.utils.port_utils import parse_nmap_top_ports, parse_ports_all, parse_ports_custom, split_ports
         sub_jobs_to_create = []
         step_counter = 0
+
+        # ✅ Lấy pool available VPNs để distribute cho sub-jobs
+        available_vpns = self.vpn_service.get_available_vpn_profiles(self.db)
+        
+        # ✅ Nếu không có VPN idle, lấy VPNs không bị reserved (bao gồm đang in_use)
+        if not available_vpns:
+            logger.warning("No idle VPNs available, using non-reserved VPNs including busy ones")
+            all_vpn_objs = crud_vpn_profile.get_all(self.db)
+            available_vpns = []
+            
+            from datetime import datetime
+            now = datetime.utcnow()
+            
+            for v in all_vpn_objs:
+                # ✅ Skip VPNs bị reserved và còn hiệu lực
+                reserved_until = getattr(v, 'reserved_until', None)
+                if reserved_until:
+                    try:
+                        if isinstance(reserved_until, str):
+                            reserved_dt = datetime.fromisoformat(reserved_until)
+                        else:
+                            reserved_dt = reserved_until
+                    except Exception:
+                        reserved_dt = None
+                    if reserved_dt and reserved_dt > now:
+                        # still reserved -> skip
+                        continue
+                
+                # ✅ Include VPNs không bị reserved (kể cả đang in_use hoặc busy)
+                available_vpns.append({
+                    'filename': getattr(v, 'filename', None),
+                    'hostname': getattr(v, 'hostname', None),
+                    'ip': getattr(v, 'ip', None),
+                    'country': getattr(v, 'country', None),
+                    'status': getattr(v, 'status', 'unknown'),
+                    'in_use_by': getattr(v, 'in_use_by', None)
+                })
+            logger.info(f"Using {len(available_vpns)} non-reserved VPNs (including busy) for sub-job distribution")
+        else:
+            logger.info(f"Using {len(available_vpns)} idle VPNs for sub-job distribution")
+            
+        vpn_index = 0  # Index để rotate through available VPNs
+
+        def get_next_vpn():
+            """Get next available VPN for sub-job distribution"""
+            nonlocal vpn_index
+            if not available_vpns:
+                logger.warning("No VPNs available for distribution")
+                return None
+            vpn = available_vpns[vpn_index % len(available_vpns)]
+            vpn_index += 1
+            
+            # ✅ Reserve VPN cho sub-job để tránh conflict
+            if vpn and vpn.get('filename'):
+                try:
+                    reserved = self.vpn_service.reserve_vpn_profile(
+                        vpn.get('filename'), 
+                        f"subjob:{workflow_db.workflow_id}", 
+                        settings.VPN_RESERVATION_TTL, 
+                        self.db
+                    )
+                    if reserved:
+                        logger.info(f"Reserved VPN {vpn.get('filename')} for sub-job")
+                    else:
+                        logger.warning(f"Failed to reserve VPN {vpn.get('filename')} for sub-job")
+                except Exception as e:
+                    logger.error(f"Error reserving VPN {vpn.get('filename')}: {e}")
+            
+            return vpn
 
         try:
             for i, step in enumerate(steps):
@@ -395,9 +502,8 @@ class WorkflowService:
                 if step.tool_id == "port-scan":
                     params = step.params.copy() if step.params else {}
                     scanner_count = params.get("scanner_count")
-                    vpn_profiles = params.get("vpn_profile")
                     port_option = params.get("ports")
-                    if isinstance(vpn_profiles, list) and scanner_count and int(scanner_count) > 1:
+                    if scanner_count and int(scanner_count) > 1:
                         base_dir = os.path.dirname(os.path.abspath(__file__))
                         if port_option == "top-1000":
                             port_list = parse_nmap_top_ports(os.path.join(base_dir, "../../data/nmap-ports-top1000.txt"))
@@ -413,6 +519,9 @@ class WorkflowService:
                                 return f"{chunk[0]}-{chunk[-1]}"
                             else:
                                 return ",".join(str(p) for p in chunk)
+                        # Tạo parent job ID cho sharded jobs
+                        parent_job_id = f"scan-port-scan-{uuid4().hex[:6]}-parent"
+                        
                         for idx, chunk in enumerate(port_chunks):
                             if not chunk:
                                 continue
@@ -420,22 +529,25 @@ class WorkflowService:
                             job_id = f"scan-port-scan-{uuid4().hex[:6]}"
                             chunk_params = params.copy()
                             chunk_params["ports"] = chunk_to_range(chunk)
-                            chunk_vpn = vpn_profiles[idx] if idx < len(vpn_profiles) else None
+                            
+                            # ✅ Assign VPN riêng cho từng sub-job
+                            job_vpn = get_next_vpn()
                             job_obj = ScanJob(
                                 job_id=job_id,
                                 tool=step.tool_id,
                                 targets=workflow_db.targets,
                                 options=chunk_params,
                                 workflow_id=workflow_db.workflow_id,
+                                parent_job_id=parent_job_id,  # ✅ Assign parent job ID
                                 step_order=step_counter,
-                                vpn_profile=chunk_vpn,
-                                vpn_country=getattr(workflow_db, "vpn_country", None),
-                                vpn_assignment=None,
+                                vpn_profile=job_vpn.get('filename') if job_vpn else None,
+                                vpn_country=job_vpn.get('country') if job_vpn else getattr(workflow_db, "vpn_country", None),
+                                vpn_assignment=job_vpn,
                                 workflow_phase=workflow_phase
                             )
                             job = crud_scan_job.create(self.db, job_obj=job_obj)
                             sub_jobs_to_create.append(job)
-                            logger.info(f"Created port-scan sub-job {job_id} chunk {idx+1}/{scanner_count} with VPN {chunk_vpn} ports {chunk_params['ports']}" )
+                            logger.info(f"Created port-scan sub-job {job_id} chunk {idx+1}/{scanner_count} with VPN {job_vpn.get('filename') if job_vpn else 'None'} ports {chunk_params['ports']}" )
                         continue
                 if step.tool_id == "nuclei-scan":
                     params = step.params.copy() if step.params else {}
@@ -446,10 +558,9 @@ class WorkflowService:
                         if not templates or not severity:
                             pass
                         else:
-                            from app.services.vpn_service import VPNService
-                            vpn_service = VPNService()
-                            available_vpns = vpn_service.get_available_vpn_profiles()
-                            vpn_idx = 0
+                            # Tạo parent job ID cho sharded nuclei jobs  
+                            parent_job_id = f"scan-nuclei-scan-{uuid4().hex[:6]}-parent"
+                            
                             for t in templates:
                                 for s in severity:
                                     step_counter += 1
@@ -458,11 +569,9 @@ class WorkflowService:
                                     job_params["templates"] = [t]
                                     job_params["severity"] = [s]
                                     job_params["distributed-scanning"] = True
-                                    if available_vpns and vpn_idx < len(available_vpns):
-                                        job_vpn = available_vpns[vpn_idx]
-                                        vpn_idx += 1
-                                    else:
-                                        job_vpn = available_vpns[vpn_idx % len(available_vpns)] if available_vpns else None
+                                    
+                                    # ✅ Assign VPN riêng cho từng sub-job
+                                    job_vpn = get_next_vpn()
                                     import json
                                     job_obj = ScanJob(
                                         job_id=job_id,
@@ -470,15 +579,16 @@ class WorkflowService:
                                         targets=workflow_db.targets,
                                         options=job_params,
                                         workflow_id=workflow_db.workflow_id,
+                                        parent_job_id=parent_job_id,  # ✅ Assign parent job ID
                                         step_order=step_counter,
-                                        vpn_profile=json.dumps(job_vpn) if isinstance(job_vpn, dict) else job_vpn,
-                                        vpn_country=getattr(workflow_db, "vpn_country", None),
-                                        vpn_assignment=None,
+                                        vpn_profile=job_vpn.get('filename') if job_vpn else None,
+                                        vpn_country=job_vpn.get('country') if job_vpn else getattr(workflow_db, "vpn_country", None),
+                                        vpn_assignment=job_vpn,
                                         workflow_phase=workflow_phase
                                     )
                                     job = crud_scan_job.create(self.db, job_obj=job_obj)
                                     sub_jobs_to_create.append(job)
-                                    logger.info(f"Created nuclei-scan sub-job {job_id} template {t} severity {s} VPN {job_vpn}")
+                                    logger.info(f"Created nuclei-scan sub-job {job_id} template {t} severity {s} with VPN {job_vpn.get('filename') if job_vpn else 'None'}")
                             continue
                 step_counter += 1
                 job_id = f"scan-{step.tool_id}-{uuid4().hex[:6]}"
@@ -506,7 +616,12 @@ class WorkflowService:
                                 start_line = 0
                                 from app.services.vpn_service import VPNService
                                 vpn_service = VPNService()
-                                available_vpns = vpn_service.get_available_vpn_profiles()
+                                # Pass DB session so we only get idle / not-in-use profiles
+                                available_vpns = vpn_service.get_available_vpn_profiles(self.db)
+                                
+                                # Tạo parent job ID cho sharded dirsearch jobs
+                                parent_job_id = f"scan-dirsearch-scan-{uuid4().hex[:6]}-parent"
+                                
                                 for idx in range(scanner_count_int):
                                     end_line = start_line + lines_per_scanner - 1
                                     if idx < remainder:
@@ -516,12 +631,9 @@ class WorkflowService:
                                     chunk_params = params.copy()
                                     chunk_params["wordlist_start"] = start_line
                                     chunk_params["wordlist_end"] = end_line
-                                    if available_vpns and idx < len(available_vpns):
-                                        chunk_vpn = available_vpns[idx]
-                                    elif available_vpns:
-                                        chunk_vpn = available_vpns[idx % len(available_vpns)]
-                                    else:
-                                        chunk_vpn = None
+                                    
+                                    # ✅ Assign VPN riêng cho từng sub-job
+                                    job_vpn = get_next_vpn()
                                     import json
                                     job_obj = ScanJob(
                                         job_id=job_id,
@@ -529,39 +641,46 @@ class WorkflowService:
                                         targets=workflow_db.targets,
                                         options=chunk_params,
                                         workflow_id=workflow_db.workflow_id,
+                                        parent_job_id=parent_job_id,  # ✅ Assign parent job ID
                                         step_order=step_counter,
-                                        vpn_profile=json.dumps(chunk_vpn) if isinstance(chunk_vpn, dict) else chunk_vpn,
-                                        vpn_country=getattr(workflow_db, "vpn_country", None),
-                                        vpn_assignment=None,
+                                        vpn_profile=job_vpn.get('filename') if job_vpn else None,
+                                        vpn_country=job_vpn.get('country') if job_vpn else getattr(workflow_db, "vpn_country", None),
+                                        vpn_assignment=job_vpn,
                                         workflow_phase=workflow_phase
                                     )
                                     job = crud_scan_job.create(self.db, job_obj=job_obj)
                                     sub_jobs_to_create.append(job)
-                                    logger.info(f"Created dirsearch-scan sub-job {job_id} chunk {idx+1}/{scanner_count_int} with VPN {chunk_vpn} lines {start_line}-{end_line}")
+                                    logger.info(f"Created dirsearch-scan sub-job {job_id} chunk {idx+1}/{scanner_count_int} with VPN {job_vpn.get('filename') if job_vpn else 'None'} lines {start_line}-{end_line}")
                                     start_line = end_line + 1
                                 continue
-                        import json
+                        # Single dirsearch job (no sharding)
                         step_counter += 1
                         job_id = f"scan-dirsearch-scan-{uuid4().hex[:6]}"
+                        
+                        # ✅ Assign VPN riêng cho sub-job
+                        job_vpn = get_next_vpn()
                         job_obj = ScanJob(
                             job_id=job_id,
                             tool=step.tool_id,
                             targets=workflow_db.targets,
-                            options=params,
+                            options=step.params or {},
                             workflow_id=workflow_db.workflow_id,
                             step_order=step_counter,
-                            vpn_profile=json.dumps(getattr(workflow_db, "vpn_profile", None)) if isinstance(getattr(workflow_db, "vpn_profile", None), dict) else getattr(workflow_db, "vpn_profile", None),
-                            vpn_country=getattr(workflow_db, "vpn_country", None),
-                            vpn_assignment=json.dumps(vpn_assignment) if isinstance(vpn_assignment, dict) else vpn_assignment,
+                            vpn_profile=job_vpn.get('filename') if job_vpn else None,
+                            vpn_country=job_vpn.get('country') if job_vpn else getattr(workflow_db, "vpn_country", None),
+                            vpn_assignment=job_vpn,
                             workflow_phase=workflow_phase
                         )
                         job = crud_scan_job.create(self.db, job_obj=job_obj)
                         sub_jobs_to_create.append(job)
-                        logger.info(f"Created dirsearch-scan single job {job_id} with VPN {getattr(workflow_db, 'vpn_profile', None)}")
+                        logger.info(f"Created dirsearch-scan single job {job_id} with auto-assigned VPN")
                         continue
                 step_counter += 1
                 job_id = f"scan-{step.tool_id}-{uuid4().hex[:6]}"
                 step_params = step.params.copy() if step.params else {}
+                
+                # ✅ Assign VPN riêng cho generic job
+                job_vpn = get_next_vpn()
                 import json
                 job_obj = ScanJob(
                     job_id=job_id,
@@ -570,14 +689,14 @@ class WorkflowService:
                     options=step_params,
                     workflow_id=workflow_db.workflow_id,
                     step_order=step_counter,
-                    vpn_profile=json.dumps(getattr(workflow_db, "vpn_profile", None)) if isinstance(getattr(workflow_db, "vpn_profile", None), dict) else getattr(workflow_db, "vpn_profile", None),
-                    vpn_country=getattr(workflow_db, "vpn_country", None),
-                    vpn_assignment=json.dumps(vpn_assignment) if isinstance(vpn_assignment, dict) else vpn_assignment,
+                    vpn_profile=job_vpn.get('filename') if job_vpn else None,
+                    vpn_country=job_vpn.get('country') if job_vpn else getattr(workflow_db, "vpn_country", None),
+                    vpn_assignment=job_vpn,
                     workflow_phase=workflow_phase
                 )
                 job = crud_scan_job.create(self.db, job_obj=job_obj)
                 sub_jobs_to_create.append(job)
-                logger.info(f"Created generic sub-job {job_id} for tool {step.tool_id} with VPN {getattr(workflow_db, 'vpn_profile', None)}")
+                logger.info(f"Created generic sub-job {job_id} for tool {step.tool_id} with VPN {job_vpn.get('filename') if job_vpn else 'None'}")
             return sub_jobs_to_create
         except Exception as e:
             logger.error(f"Exception in _create_sub_jobs_in_db: {e}")
@@ -617,7 +736,7 @@ class WorkflowService:
         workflow_info = {
             "workflow_id": workflow.workflow_id, "status": workflow.status, "updated_at": workflow.updated_at,
             "created_at": workflow.created_at, "targets": workflow.targets,
-            "vpn": workflow.vpn_country or workflow.vpn_profile
+            "vpn": workflow.vpn_country
         }
 
         return {

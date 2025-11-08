@@ -8,7 +8,6 @@ class ScanJobRequest(BaseModel):
     tool: str
     targets: List[str]
     options: Dict[str, Any] = {}
-    vpn_profile: Optional[str] = None
     country: Optional[str] = None
 
 class ScanJob(BaseModel):
@@ -20,7 +19,7 @@ class ScanJob(BaseModel):
     options: Optional[Dict[str, Any]] = None
     status: str
     error_message: Optional[str] = None
-    vpn_profile: Optional[str] = None
+    vpn_profile: Optional[str] = None  # Lưu VPN filename được assign
     vpn_country: Optional[str] = None
     vpn_hostname: Optional[str] = None
     vpn_assignment: Optional[Dict[str, Any]] = None

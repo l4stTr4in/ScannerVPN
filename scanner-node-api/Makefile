@@ -41,6 +41,9 @@ build-tools:
 	@eval $$(minikube docker-env); docker build --no-cache -t $(REGISTRY)/nuclei-scan:$(TAG) ../scan-node-tools/nuclei-scan
 	@eval $$(minikube docker-env); docker build --no-cache -t $(REGISTRY)/wpscan-scan:$(TAG) ../scan-node-tools/wpscan-scan
 	@eval $$(minikube docker-env); docker build --no-cache -t $(REGISTRY)/dirsearch-scan:$(TAG) ../scan-node-tools/dirsearch-scan
+	@eval $$(minikube docker-env); docker build --no-cache -t $(REGISTRY)/sqlmap-scan:$(TAG) ../scan-node-tools/sqlmap-scan
+	@eval $$(minikube docker-env); docker build --no-cache -t $(REGISTRY)/bruteforce:$(TAG) ../scan-node-tools/bruteforce
+	@eval $$(minikube docker-env); docker build --no-cache -t $(REGISTRY)/ffuf-entry:$(TAG) ../scan-node-tools/ffuf-entry
 	@echo "✅ All scan tools built"
 
 build-all: build-scanner build-tools
@@ -55,6 +58,9 @@ push: build-all
 	docker push $(REGISTRY)/nuclei-scan:$(TAG)
 	docker push $(REGISTRY)/wpscan-scan:$(TAG)
 	docker push $(REGISTRY)/dirsearch-scan:$(TAG)
+	docker push $(REGISTRY)/sqlmap-scan:$(TAG)
+	docker push $(REGISTRY)/bruteforce:$(TAG)
+	docker push $(REGISTRY)/ffuf-entry:$(TAG)
 	@echo "✅ All images pushed"
 
 deploy:

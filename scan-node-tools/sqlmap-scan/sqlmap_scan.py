@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
-import argparse, subprocess, sys, json, tempfile, re, os, requests
+import argparse, subprocess, sys, json, tempfile, re, os, requests, logging
 from vpn_manager import VPNManager
+
+# Configure concise logger (match dns_lookup style)
+logger = logging.getLogger("sqlmap_scan")
+if not logger.handlers:
+    h = logging.StreamHandler(stream=sys.stdout)
+    h.setFormatter(logging.Formatter("[SQLMAP] %(levelname)s: %(message)s"))
+    logger.addHandler(h)
+    logger.setLevel(logging.INFO)
 
 def run(cmd):
     """Chạy lệnh, nếu lỗi thì trả JSON báo lỗi kèm stderr"""
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode != 0:
         err = (p.stderr or p.stdout or "").strip()
+        logger.error(f"SQLMap failed: {err}")
         print(json.dumps({"error": "sqlmap failed", "code": p.returncode, "stderr": err}, ensure_ascii=False))
         sys.exit(p.returncode)
     return p
@@ -19,68 +28,94 @@ def run(cmd):
 #   --risk 1
 
 if __name__ == "__main__":
-    print("[*] Starting sqlmap scan with VPN...")
+    logger.info("Starting SQLMap scan with VPN")
+
     # Setup VPN trước khi scan
     vpn_manager = VPNManager()
     vpn_connected = False
     network_info = {}
+
+    # Lấy VPN assignment từ Controller (nếu có)
     assigned_vpn = None
     controller_url = os.getenv("CONTROLLER_CALLBACK_URL")
-    vpn_assignment = os.getenv("VPN_ASSIGNMENT")
-    
+    vpn_assignment = os.getenv("VPN_ASSIGNMENT")  # VPN được assign từ Controller
+
     if vpn_assignment:
         try:
             assigned_vpn = json.loads(vpn_assignment)
-            print(f"[*] Received VPN assignment from Controller: {assigned_vpn.get('hostname', 'Unknown')}")
+            logger.info(f"Received VPN assignment: {assigned_vpn.get('hostname', 'Unknown')}")
         except json.JSONDecodeError as e:
-            print(f"[!] Failed to parse VPN assignment: {e}")
+            logger.warning(f"Failed to parse VPN assignment: {e}")
+
+    vpn_profile_info = None
+    # Thử setup VPN (optional - có thể skip nếu proxy server không available)
+    try:
+        logger.debug("Checking initial network status")
+        initial_info = vpn_manager.get_network_info()
+        logger.debug(f"Initial IP: {initial_info['public_ip']}")
+
+        # Sử dụng assigned VPN nếu có, nếu không thì dùng random
+        if assigned_vpn:
+            meta = vpn_manager.setup_specific_vpn(assigned_vpn)
+            if meta:
+                logger.info("Connected to assigned VPN")
+                vpn_manager.print_vpn_status()
+                network_info = vpn_manager.get_network_info()
+                vpn_connected = True
+                vpn_profile_info = meta
+            else:
+                logger.info("Failed to connect to assigned VPN, will try random")
+
+        if not vpn_connected:
+            logger.info("No VPN assignment from Controller or failed, using random VPN")
+            meta = vpn_manager.setup_random_vpn()
+            if meta:
+                logger.info("VPN setup completed")
+                vpn_manager.print_vpn_status()
+                network_info = vpn_manager.get_network_info()
+                vpn_connected = True
+                vpn_profile_info = meta
+            else:
+                logger.info("VPN connection failed, continuing without VPN")
+
+        # Gửi thông báo connect VPN về controller nếu kết nối thành công
+        if vpn_connected and controller_url and vpn_profile_info:
+            try:
+                job_id = os.getenv("JOB_ID")
+                payload = {"action": "connect", "scanner_id": job_id}
+                if vpn_profile_info.get("filename"):
+                    payload["filename"] = vpn_profile_info["filename"]
+                logger.info(f"Notify controller connect: {payload}")
+                resp = requests.post(f"{controller_url}/api/vpn_profiles/update", json=payload, timeout=10)
+                logger.debug(f"Controller connect response: {resp.status_code}")
+            except Exception as notify_err:
+                logger.warning(f"Failed to notify controller connect: {notify_err}")
+    except Exception as e:
+        logger.warning(f"VPN setup error: {e}, continuing without VPN...")
 
     try:
-        print("[*] Checking initial network status...")
-        initial_info = vpn_manager.get_network_info()
-        print(f"[*] Initial IP: {initial_info['public_ip']}")
-        
-        if assigned_vpn:
-            if vpn_manager.setup_specific_vpn(assigned_vpn):
-                print(f"[+] Connected to assigned VPN: {assigned_vpn.get('hostname', 'Unknown')}")
-                vpn_manager.print_vpn_status()
-                network_info = vpn_manager.get_network_info()
-                vpn_connected = True
-            else:
-                print("[!] Failed to connect to assigned VPN, trying random...")
-                if vpn_manager.setup_random_vpn():
-                    print("[+] Connected to random VPN as fallback!")
-                    vpn_manager.print_vpn_status()
-                    network_info = vpn_manager.get_network_info()
-                    vpn_connected = True
-        else:
-            print("[*] No VPN assignment from Controller, using random VPN...")
-            if vpn_manager.setup_random_vpn():
-                print("[+] VPN setup completed!")
-                vpn_manager.print_vpn_status()
-                network_info = vpn_manager.get_network_info()
-                vpn_connected = True
-            else:
-                print("[!] VPN connection failed, continuing without VPN...")
-
-
         # Luôn lấy danh sách target từ ENV TARGETS
         targets_env = os.getenv("TARGETS", "").split(",") if os.getenv("TARGETS") else []
         targets_env = [t.strip() for t in targets_env if t.strip()]
         if not targets_env:
-            print(json.dumps({"error": "missing TARGETS env"})); sys.exit(2)
-
-
+            logger.error("Missing TARGETS env")
+            print(json.dumps({"error": "missing TARGETS env"})); 
+            sys.exit(2)
 
         # Luôn lấy tham số từ ENV SCAN_OPTIONS
         scan_options = os.getenv("SCAN_OPTIONS")
         if not scan_options:
-            print(json.dumps({"error": "missing SCAN_OPTIONS env"})); sys.exit(2)
+            logger.error("Missing SCAN_OPTIONS env")
+            print(json.dumps({"error": "missing SCAN_OPTIONS env"})); 
+            sys.exit(2)
         try:
             options = json.loads(scan_options)
         except Exception as e:
-            print(json.dumps({"error": f"invalid SCAN_OPTIONS: {e}"})); sys.exit(2)
+            logger.error(f"Invalid SCAN_OPTIONS: {e}")
+            print(json.dumps({"error": f"invalid SCAN_OPTIONS: {e}"})); 
+            sys.exit(2)
 
+        # Parse options
         threads = options.get("threads", 1)
         level = options.get("level", 1)
         risk = options.get("risk", 1)
@@ -99,9 +134,14 @@ if __name__ == "__main__":
         skip_urlencode = options.get("skip_urlencode", False)
         parameter = options.get("parameter")
 
+        job_id = os.getenv("JOB_ID")
+        workflow_id = os.getenv("WORKFLOW_ID")
+
+        logger.info(f"SQLMap starting for targets: {targets_env}")
 
         # Lặp qua từng target, quét và gửi kết quả từng target một
         for target_url in targets_env:
+            logger.debug(f"Scanning {target_url}")
             with tempfile.TemporaryDirectory() as temp_dir:
                 output_dir = os.path.join(temp_dir, "sqlmap_output")
                 os.makedirs(output_dir, exist_ok=True)
@@ -125,9 +165,31 @@ if __name__ == "__main__":
                     base_cmd += ["--delay", str(delay)]
                 if parameter:
                     base_cmd += ["-p", parameter]
+                if data:
+                    base_cmd += ["--data", data]
+                if cookie:
+                    base_cmd += ["--cookie", cookie]
+                if headers:
+                    if isinstance(headers, dict):
+                        for key, value in headers.items():
+                            base_cmd += ["--header", f"{key}: {value}"]
+                    elif isinstance(headers, str):
+                        # Parse string headers like "User-Agent:sqlmap;X-Forwarded-For:127.0.0.1"
+                        for header in headers.split(';'):
+                            if ':' in header:
+                                base_cmd += ["--header", header.strip()]
+                if timeout:
+                    base_cmd += ["--timeout", str(timeout)]
+                if retries:
+                    base_cmd += ["--retries", str(retries)]
+                if identify_waf:
+                    base_cmd += ["--identify-waf"]
+                if skip_urlencode:
+                    base_cmd += ["--skip-urlencode"]
+                    
                 base_cmd += ["-u", target_url]
 
-                print(f"[*] Running: {' '.join(base_cmd)}")
+                logger.debug(f"Running: {' '.join(base_cmd)}")
                 p = subprocess.run(base_cmd, capture_output=True, text=True)
 
                 findings = []
@@ -170,14 +232,13 @@ if __name__ == "__main__":
                     "has_vulnerabilities": len(vulnerabilities) > 0
                 }
 
+                logger.debug(f"Result for {target_url}: {len(vulnerabilities)} vulnerabilities, {len(findings)} findings")
                 print(json.dumps(result, ensure_ascii=False))
 
-                job_id = os.getenv("JOB_ID")
-                workflow_id = os.getenv("WORKFLOW_ID")
-
+                # Gửi kết quả về Controller nếu có callback URL
                 if controller_url:
                     try:
-                        has_findings = len(vulnerabilities) > 0
+                        has_findings = len(vulnerabilities) > 0 or len(findings) > 0
                         payload = {
                             "target": target_url,
                             "resolved_ips": [],
@@ -196,13 +257,31 @@ if __name__ == "__main__":
                                 "databases_found": len(findings)
                             }
                         }
-                        print(f"[*] Sending result to Controller for {target_url}: {len(vulnerabilities)} vulnerabilities")
+                        logger.debug(f"Sending result to Controller: {payload}")
                         response = requests.post(f"{controller_url}/api/scan_results", json=payload, timeout=30)
-                        print(f"[*] Controller response: {response.status_code}")
+                        logger.debug(f"Controller response: {response.status_code}")
                     except Exception as e:
-                        print(f"[!] Error sending results to Controller: {e}")
+                        logger.warning(f"Error sending results to Controller: {e}")
+
+        logger.info("SQLMap scan completed")
+
+    except Exception as e:
+        logger.warning(f"Scan error: {e}")
 
     finally:
+        # Gửi thông báo disconnect VPN về controller nếu đã connect VPN
+        if vpn_connected and controller_url and vpn_profile_info:
+            try:
+                job_id = os.getenv("JOB_ID")
+                payload = {"action": "disconnect", "scanner_id": job_id}
+                if vpn_profile_info.get("filename"):
+                    payload["filename"] = vpn_profile_info["filename"]
+                logger.info(f"Notify controller disconnect: {payload}")
+                resp = requests.post(f"{controller_url}/api/vpn_profiles/update", json=payload, timeout=10)
+                logger.debug(f"Controller disconnect response: {resp.status_code}")
+            except Exception as notify_err:
+                logger.warning(f"Failed to notify controller disconnect: {notify_err}")
+        # Cleanup VPN
         if vpn_connected:
-            print("[*] Disconnecting VPN...")
+            logger.info("Disconnecting VPN")
             vpn_manager.disconnect_vpn()
