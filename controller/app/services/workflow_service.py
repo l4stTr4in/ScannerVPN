@@ -317,28 +317,19 @@ class WorkflowService:
             # Truyền workflow_phase=1 vào sub-job
             current_phase = 1
 
+        # ❌ Bỏ VPN reservation ở workflow level - chỉ reserve ở sub-job level
         vpn_assignment = await self._assign_vpn_to_workflow(workflow_in)
 
-        # If assignment succeeded from available (idle/unreserved) pool, reserve it now
+        # Chỉ update workflow metadata mà không reserve VPN
         if vpn_assignment:
-            # Try to reserve in controller DB so other assignments won't pick it
-            try:
-                reserved = self.vpn_service.reserve_vpn_profile(
-                    vpn_assignment.get('filename'), f"workflow:{workflow_id}", settings.VPN_RESERVATION_TTL, self.db
-                )
-                if not reserved:
-                    logger.info("Failed to reserve VPN %s for workflow %s", vpn_assignment.get('filename'), workflow_id)
-            except Exception:
-                logger.exception("Error reserving vpn for workflow")
-
             crud_workflow.update(self.db, db_obj=workflow_db, obj_in={
                 "vpn_assignment": vpn_assignment, 
                 "vpn_profile": vpn_assignment.get('filename'),
                 "vpn_country": vpn_assignment.get('country')
             })
-            logger.info(f"Assigned VPN {vpn_assignment.get('hostname')} to workflow {workflow_id}")
+            logger.info(f"Assigned VPN {vpn_assignment.get('hostname')} to workflow {workflow_id} (metadata only)")
         else:
-            # Fallback: if no idle/unreserved VPN available, allow assigning any (reserved/in-use) VPN
+            # Fallback: if no idle/unreserved VPN available, assign any VPN (metadata only)
             try:
                 all_profiles = crud_vpn_profile.get_all(self.db)
                 if all_profiles:
@@ -349,17 +340,13 @@ class WorkflowService:
                         'hostname': getattr(chosen, 'hostname', None),
                         'country': getattr(chosen, 'country', None)
                     }
-                    # Force reserve to avoid race (allow overriding in_use if necessary)
-                    try:
-                        self.vpn_service.reserve_vpn_profile(vpn_assignment.get('filename'), f"workflow:{workflow_id}", settings.VPN_RESERVATION_TTL, self.db, force=True)
-                    except Exception:
-                        logger.exception("Failed to force-reserve VPN during fallback assignment")
+                    # ❌ Bỏ force reserve VPN - chỉ update metadata
                     crud_workflow.update(self.db, db_obj=workflow_db, obj_in={
                         "vpn_assignment": vpn_assignment, 
                         "vpn_profile": vpn_assignment.get('filename'),
                         "vpn_country": vpn_assignment.get('country')
                     })
-                    logger.info(f"Fallback-assigned VPN {vpn_assignment.get('hostname')} to workflow {workflow_id}")
+                    logger.info(f"Fallback-assigned VPN {vpn_assignment.get('hostname')} to workflow {workflow_id} (metadata only)")
             except Exception:
                 logger.exception("Error during fallback vpn assignment")
 
@@ -469,7 +456,7 @@ class WorkflowService:
             
         vpn_index = 0  # Index để rotate through available VPNs
 
-        def get_next_vpn():
+        def get_next_vpn(job_id=None):
             """Get next available VPN for sub-job distribution"""
             nonlocal vpn_index
             if not available_vpns:
@@ -478,21 +465,21 @@ class WorkflowService:
             vpn = available_vpns[vpn_index % len(available_vpns)]
             vpn_index += 1
             
-            # ✅ Reserve VPN cho sub-job để tránh conflict
-            if vpn and vpn.get('filename'):
+            # ✅ Reserve VPN cho specific sub-job với đúng job_id
+            if vpn and vpn.get('filename') and job_id:
                 try:
                     reserved = self.vpn_service.reserve_vpn_profile(
                         vpn.get('filename'), 
-                        f"subjob:{workflow_db.workflow_id}", 
+                        f"job:{job_id}",  # ✅ Sửa từ subjob:workflow-id thành job:job-id
                         settings.VPN_RESERVATION_TTL, 
                         self.db
                     )
                     if reserved:
-                        logger.info(f"Reserved VPN {vpn.get('filename')} for sub-job")
+                        logger.info(f"Reserved VPN {vpn.get('filename')} for job {job_id}")
                     else:
-                        logger.warning(f"Failed to reserve VPN {vpn.get('filename')} for sub-job")
+                        logger.warning(f"Failed to reserve VPN {vpn.get('filename')} for job {job_id}")
                 except Exception as e:
-                    logger.error(f"Error reserving VPN {vpn.get('filename')}: {e}")
+                    logger.error(f"Error reserving VPN {vpn.get('filename')} for job {job_id}: {e}")
             
             return vpn
 
@@ -530,8 +517,8 @@ class WorkflowService:
                             chunk_params = params.copy()
                             chunk_params["ports"] = chunk_to_range(chunk)
                             
-                            # ✅ Assign VPN riêng cho từng sub-job
-                            job_vpn = get_next_vpn()
+                            # ✅ Assign VPN riêng cho từng sub-job với đúng job_id
+                            job_vpn = get_next_vpn(job_id)
                             job_obj = ScanJob(
                                 job_id=job_id,
                                 tool=step.tool_id,
@@ -570,8 +557,8 @@ class WorkflowService:
                                     job_params["severity"] = [s]
                                     job_params["distributed-scanning"] = True
                                     
-                                    # ✅ Assign VPN riêng cho từng sub-job
-                                    job_vpn = get_next_vpn()
+                                    # ✅ Assign VPN riêng cho từng sub-job với đúng job_id
+                                    job_vpn = get_next_vpn(job_id)
                                     import json
                                     job_obj = ScanJob(
                                         job_id=job_id,
@@ -632,8 +619,8 @@ class WorkflowService:
                                     chunk_params["wordlist_start"] = start_line
                                     chunk_params["wordlist_end"] = end_line
                                     
-                                    # ✅ Assign VPN riêng cho từng sub-job
-                                    job_vpn = get_next_vpn()
+                                    # ✅ Assign VPN riêng cho từng sub-job với đúng job_id
+                                    job_vpn = get_next_vpn(job_id)
                                     import json
                                     job_obj = ScanJob(
                                         job_id=job_id,
@@ -657,8 +644,8 @@ class WorkflowService:
                         step_counter += 1
                         job_id = f"scan-dirsearch-scan-{uuid4().hex[:6]}"
                         
-                        # ✅ Assign VPN riêng cho sub-job
-                        job_vpn = get_next_vpn()
+                        # ✅ Assign VPN riêng cho sub-job với đúng job_id
+                        job_vpn = get_next_vpn(job_id)
                         job_obj = ScanJob(
                             job_id=job_id,
                             tool=step.tool_id,
@@ -679,8 +666,8 @@ class WorkflowService:
                 job_id = f"scan-{step.tool_id}-{uuid4().hex[:6]}"
                 step_params = step.params.copy() if step.params else {}
                 
-                # ✅ Assign VPN riêng cho generic job
-                job_vpn = get_next_vpn()
+                # ✅ Assign VPN riêng cho generic job với đúng job_id
+                job_vpn = get_next_vpn(job_id)
                 import json
                 job_obj = ScanJob(
                     job_id=job_id,

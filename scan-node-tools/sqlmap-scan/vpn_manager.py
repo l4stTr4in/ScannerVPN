@@ -33,7 +33,7 @@ class VPNManager:
     def download_vpn(self, filename):
         """Download VPN config file"""
         try:
-            r = requests.get(f"{self.proxy_node}/vpn/{filename}", timeout=30)
+            r = requests.get(f"{self.proxy_node}/vpn/{filename}", timeout=20)  # Giảm từ 30→20s
             r.raise_for_status()
             vpn_path = f"/tmp/{filename}"
             with open(vpn_path, "wb") as f:
@@ -70,7 +70,7 @@ class VPNManager:
             # Start openvpn and monitor stdout for initialization completion
             self.vpn_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             start = time.time()
-            timeout = 90
+            timeout = 45  # Giảm từ 90→45s để tối ưu tốc độ
             init_ok = False
             # Read lines until we find success or timeout
             while True:
@@ -170,7 +170,7 @@ nameserver 8.8.4.4
             logger.info("Ngắt kết nối VPN")
             try:
                 self.vpn_process.terminate()
-                self.vpn_process.wait(timeout=10)
+                self.vpn_process.wait(timeout=5)  # Giảm từ 10→5s
             except subprocess.TimeoutExpired:
                 self.vpn_process.kill()
             finally:
