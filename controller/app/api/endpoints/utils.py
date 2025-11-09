@@ -252,7 +252,7 @@ def list_supported_tools():
                 
                 # Job JSON Mode
                 {"name": "job_json_content", "label": "Nội dung Job JSON", "component": "Textarea", "placeholder": "Paste job.json content từ FFUF tool...", "conditional": {"field": "input_mode", "value": "job_json"}},
-                
+                {"name": "note", "label": "Lưu ý", "component": "Textarea", "placeholder": "Các tham số dưới đây chỉ nhập khi input_mode là manual"},
                 # Manual Mode - Strategy
                 {"name": "strategy", "label": "Chiến lược tấn công", "component": "Select", "defaultValue": "dictionary", "data": [
                     {"value": "dictionary", "label": "Dictionary (Một user - nhiều pass)"},
@@ -315,11 +315,11 @@ def list_supported_tools():
             "name": "Tìm kiếm Login Form (FFUF)",
             "description": "Sử dụng FFUF để tìm kiếm các endpoint login và tự động tạo profile cho bruteforce. Có thể chọn option emit_job để tự động tạo file job.json cho tool bruteforce sử dụng.",
             "fields": [
-                {"name": "wordlist", "label": "Wordlist endpoints", "component": "ComboBox", "defaultValue": "default", "data": [
+                {"name": "wordlist", "label": "Wordlist endpoints", "component": "Select", "defaultValue": "default", "data": [
                     {"value": "default", "label": "Sử dụng wordlist mặc định"},
                     {"value": "common.txt", "label": "common.txt"},
                     {"value": "admin-panels.txt", "label": "admin-panels.txt"}
-                ], "placeholder": "Chọn từ danh sách hoặc nhập đường dẫn tùy chỉnh"},
+                ]},
                 {"name": "rate", "label": "Tốc độ request/giây", "component": "NumberInput", "defaultValue": 50, "min": 1, "max": 200},
                 {"name": "threads", "label": "Số luồng FFUF", "component": "NumberInput", "defaultValue": 50, "min": 1, "max": 100},
                 {"name": "codes", "label": "HTTP status codes quan tâm", "component": "TagsInput", "defaultValue": ["200", "301", "302", "401", "403"], "placeholder": "200,301,302,401,403"},
@@ -327,8 +327,8 @@ def list_supported_tools():
                 {"name": "insecure", "label": "Bỏ qua SSL verification", "component": "Switch", "defaultValue": False},
                 
                 # Emit Job Parameters cho Bruteforce
-               
                 {"name": "emit_job", "label": "Tạo job.json sử dụng cho tool bruteforce", "component": "Switch", "defaultValue": True},
+                {"name": "note", "label": "Lưu ý", "component": "Textarea", "placeholder": "Các tham số dưới đây chỉ nhập khi input emit_job được bật"},
                 {"name": "users_wordlist", "label": "Wordlist usernames", "component": "Select", "defaultValue": "users.txt", "data": [
                     {"value": "users.txt", "label": "users.txt"}
                 ], "conditional": {"field": "emit_job", "value": True}},
