@@ -239,6 +239,16 @@ def main():
     ap.add_argument("--stop-on-success", action="store_true", default=True)
     ap.add_argument("--no-stop-on-success", dest="stop_on_success", action="store_false")
 
+    # Parse SCAN_OPTIONS từ environment trước khi parse args
+    scan_options_str = os.environ.get("SCAN_OPTIONS")
+    scan_options = {}
+    if scan_options_str:
+        try:
+            scan_options = json.loads(scan_options_str)
+            logger.info("Parsed SCAN_OPTIONS from environment")
+        except Exception as e:
+            logger.warning(f"Failed to parse SCAN_OPTIONS: {e}")
+    
     args = ap.parse_args()
     
     logger.debug("Command line args: %s", sys.argv)
@@ -259,16 +269,90 @@ def main():
     if not target_urls:
         logger.error("No URL provided. Use --url, TARGETS env var, or positional argument.")
         sys.exit(1)
+    
+    # Override parameters from SCAN_OPTIONS if available
+    if scan_options:
+        logger.info("Applying parameters from SCAN_OPTIONS")
+        
+        # Override ffuf parameters
+        if "rate" in scan_options:
+            args.rate = int(scan_options["rate"])
+        if "threads" in scan_options:
+            args.threads = int(scan_options["threads"])
+        if "timeout" in scan_options:
+            args.timeout = int(scan_options["timeout"])
+        if "insecure" in scan_options:
+            args.insecure = bool(scan_options["insecure"])
+        
+        # Handle codes (TagsInput array)
+        if "codes" in scan_options:
+            codes_val = scan_options["codes"]
+            if isinstance(codes_val, list):
+                args.codes = ",".join(str(c) for c in codes_val)
+            else:
+                args.codes = str(codes_val)
+        
+        # Override emit_job related parameters
+        if "emit_job" in scan_options:
+            args.emit_job = bool(scan_options["emit_job"])
+        if "users_wordlist" in scan_options:
+            args.users = f"/app/wordlists/{scan_options['users_wordlist']}"
+        if "passwords_wordlist" in scan_options:
+            args.passwords = f"/app/wordlists/{scan_options['passwords_wordlist']}"
+        if "pairs_wordlist" in scan_options:
+            args.pairs = f"/app/wordlists/{scan_options['pairs_wordlist']}"
+        if "bf_strategy" in scan_options:
+            args.strategy = scan_options["bf_strategy"]
+        if "bf_concurrency" in scan_options:
+            args.concurrency = int(scan_options["bf_concurrency"])
+        if "bf_rate_per_min" in scan_options:
+            args.rate_per_min = int(scan_options["bf_rate_per_min"])
+        if "bf_jitter" in scan_options:
+            args.jitter = scan_options["bf_jitter"]
+        if "bf_timeout_sec" in scan_options:
+            args.timeout_sec = int(scan_options["bf_timeout_sec"])
+        if "bf_stop_on_success" in scan_options:
+            args.stop_on_success = bool(scan_options["bf_stop_on_success"])
+        
+        logger.info(f"Updated parameters: rate={args.rate}, threads={args.threads}, codes={args.codes}, emit_job={args.emit_job}")
         
     verify_ssl = not args.insecure
 
-    # 1) Chọn wordlist
-    if args.wordlist and os.path.exists(args.wordlist):
+    # 1) Chọn wordlist với SCAN_OPTIONS support
+    wl = None
+    
+    # Priority 1: SCAN_OPTIONS wordlist selection
+    if scan_options and scan_options.get("wordlist"):
+        wordlist_value = scan_options.get("wordlist")
+        
+        # Nếu là "default", dùng mặc định 
+        if wordlist_value == "default":
+            logger.info("SCAN_OPTIONS: Using default wordlist")
+        # Nếu là tên file (common.txt, admin-panels.txt), tìm trong /app/wordlists/
+        elif wordlist_value.endswith(".txt"):
+            wordlist_path = f"/app/wordlists/{wordlist_value}"
+            if os.path.exists(wordlist_path):
+                wl = wordlist_path
+                logger.info(f"SCAN_OPTIONS: Using predefined wordlist: {wordlist_value}")
+            else:
+                logger.warning(f"SCAN_OPTIONS: Wordlist file not found: {wordlist_path}")
+        # Nếu là đường dẫn tùy chỉnh (có thể absolute hoặc relative)
+        else:
+            if os.path.exists(wordlist_value):
+                wl = wordlist_value
+                logger.info(f"SCAN_OPTIONS: Using custom wordlist path: {wordlist_value}")
+            else:
+                logger.warning(f"SCAN_OPTIONS: Custom wordlist path not found: {wordlist_value}")
+    
+    # Priority 2: Command line wordlist
+    if not wl and args.wordlist and os.path.exists(args.wordlist):
         wl = args.wordlist
-    else:
-        # Sử dụng wordlist mặc định cho path mode
+        logger.info(f"Using command line wordlist: {args.wordlist}")
+    
+    # Priority 3: Default wordlist (fallback)
+    if not wl:
+        logger.info("Using default wordlist (built-in endpoints)")
         default_words = DEFAULT_WORDS
-            
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".txt")
         tmp.write(("\n".join(default_words)).encode("utf-8"))
         tmp.close()

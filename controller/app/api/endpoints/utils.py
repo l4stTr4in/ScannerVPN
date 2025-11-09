@@ -36,13 +36,7 @@ def list_supported_tools():
                     "name": "ports",
                     "label": "Hoặc nhập các cổng cụ thể",
                     "component": "TextInput",
-                    "placeholder": "vd: 80,443,8080",
-                    "presets": [
-                        {"label": "Top 1000 Ports", "value": "top-1000"},
-                        {"label": "All Ports", "value": "all"},
-                        {"label": "Web Ports", "value": "80,443,8080,8443"},
-                        {"label": "Database Ports", "value": "3306,5432,1433,27017"}
-                    ]
+                    "placeholder": "top-1000 or all or 80,443,8080"
                 },
                 {
                     "name": "scan_type",
@@ -116,7 +110,7 @@ def list_supported_tools():
             "fields": [
                 {"name": "severity", "label": "Mức độ nghiêm trọng", "component": "MultiSelect", "defaultValue": ["high", "critical"], "data": ["info", "low", "medium", "high", "critical"]},
                 {"name": "templates", "label": "Chạy các mẫu cụ thể", "component": "MultiSelect", "placeholder": "Để trống để chạy các mẫu đề xuất", "data": ["cves", "default-logins", "exposed-panels", "vulnerabilities"]},
-                {"name": "distributed_scanning", "label": "Quét phân tán (Distributed Scanning)", "component": "Switch", "defaultValue": False}
+                {"name": "distributed-scanning", "label": "Quét phân tán (Distributed Scanning)", "component": "Switch", "defaultValue": False}
             ]
         },
         {
@@ -216,8 +210,8 @@ def list_supported_tools():
             "name": "Quét SQL Injection (SQLMap)",
             "description": "Tự động phát hiện và khai thác các lỗ hổng SQL injection.",
             "fields": [
-                {"name": "data", "label": "POST data/raw hoặc file", "component": "TextInput", "placeholder": "vd: id=1&name=test hoặc file:@post.txt"},
-                {"name": "headers", "label": "Headers (JSON hoặc Key:Value)", "component": "TextInput", "placeholder": "vd: {\"User-Agent\":\"sqlmap\"} hoặc User-Agent:sqlmap;X-Forwarded-For:127.0.0.1"},
+                {"name": "data", "label": "POST data/raw", "component": "TextInput", "placeholder": "vd: id=1&name=test"},
+                {"name": "headers", "label": "Headers (JSON hoặc Key:Value)", "component": "TextInput", "placeholder": "User-Agent:sqlmap;X-Forwarded-For:127.0.0.1"},
                 {"name": "cookie", "label": "Cookie string", "component": "TextInput", "placeholder": "vd: PHPSESSID=abc; user=admin"},
                 {"name": "parameter", "label": "Tham số cần kiểm tra (-p)", "component": "TextInput", "placeholder": "vd: id,username"},
                 {"name": "technique", "label": "Kỹ thuật tấn công", "component": "TextInput", "placeholder": "vd: BEUS (Boolean, Error, Union, Stacked)"},
@@ -321,14 +315,11 @@ def list_supported_tools():
             "name": "Tìm kiếm Login Form (FFUF)",
             "description": "Sử dụng FFUF để tìm kiếm các endpoint login và tự động tạo profile cho bruteforce. Có thể chọn option emit_job để tự động tạo file job.json cho tool bruteforce sử dụng.",
             "fields": [
-                {"name": "wordlist", "label": "Wordlist endpoints", "component": "Select", "defaultValue": "default", "data": [
+                {"name": "wordlist", "label": "Wordlist endpoints", "component": "ComboBox", "defaultValue": "default", "data": [
                     {"value": "default", "label": "Sử dụng wordlist mặc định"},
-                    {"value": "custom", "label": "Wordlist tùy chỉnh"}
-                ]},
-                {"name": "custom_wordlist", "label": "Wordlist tùy chỉnh", "component": "Select", "defaultValue": "common.txt", "data": [
                     {"value": "common.txt", "label": "common.txt"},
                     {"value": "admin-panels.txt", "label": "admin-panels.txt"}
-                ], "conditional": {"field": "wordlist", "value": "custom"}},
+                ], "placeholder": "Chọn từ danh sách hoặc nhập đường dẫn tùy chỉnh"},
                 {"name": "rate", "label": "Tốc độ request/giây", "component": "NumberInput", "defaultValue": 50, "min": 1, "max": 200},
                 {"name": "threads", "label": "Số luồng FFUF", "component": "NumberInput", "defaultValue": 50, "min": 1, "max": 100},
                 {"name": "codes", "label": "HTTP status codes quan tâm", "component": "TagsInput", "defaultValue": ["200", "301", "302", "401", "403"], "placeholder": "200,301,302,401,403"},
@@ -336,6 +327,7 @@ def list_supported_tools():
                 {"name": "insecure", "label": "Bỏ qua SSL verification", "component": "Switch", "defaultValue": False},
                 
                 # Emit Job Parameters cho Bruteforce
+               
                 {"name": "emit_job", "label": "Tạo job.json sử dụng cho tool bruteforce", "component": "Switch", "defaultValue": True},
                 {"name": "users_wordlist", "label": "Wordlist usernames", "component": "Select", "defaultValue": "users.txt", "data": [
                     {"value": "users.txt", "label": "users.txt"}

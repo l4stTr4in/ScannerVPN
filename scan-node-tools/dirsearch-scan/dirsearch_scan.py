@@ -168,6 +168,7 @@ if __name__ == "__main__":
             try:
                 import json
                 scan_options = json.loads(scan_options_env)
+                logger.debug("Parsed SCAN_OPTIONS: %s", scan_options)
                 # Map key -> arg
                 option_map = {
                     "wordlist": "--wordlist",
@@ -191,7 +192,17 @@ if __name__ == "__main__":
                         if v:
                             new_argv.append(arg_name)
                     else:
-                        new_argv.extend([arg_name, str(v)])
+                        # Handle list values (e.g. include_status might be [200] instead of "200")
+                        if isinstance(v, list):
+                            if k == "include_status":
+                                # Convert list to comma-separated string: [200, 301] -> "200,301"
+                                value_str = ",".join(str(x) for x in v)
+                            else:
+                                # For other list params, join with comma
+                                value_str = ",".join(str(x) for x in v)
+                        else:
+                            value_str = str(v)
+                        new_argv.extend([arg_name, value_str])
             except Exception as e:
                 logger.debug("Failed to parse SCAN_OPTIONS env: %s", e)
 
@@ -262,6 +273,7 @@ if __name__ == "__main__":
             base_cmd += ["-w", wordlist_path]
         if include_status_raw:
             base_cmd += ["-i", include_status_raw]
+            logger.debug("Adding status filter: -i %s", include_status_raw)
         if args.extensions and not args.no_extensions:
             base_cmd += ["-e", args.extensions]
         if 'random_agent_flag' in locals() and random_agent_flag:
@@ -288,6 +300,7 @@ if __name__ == "__main__":
         logger.debug("extensions: %s", args.extensions)
         logger.debug("include_status: %s", getattr(args, 'include_status', None))
         logger.debug("recursive: %s", args.recursive)
+        logger.debug("Final command: %s", " ".join(base_cmd))
 
         # Xác định danh sách target
         if args.url_file:

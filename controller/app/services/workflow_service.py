@@ -470,7 +470,7 @@ class WorkflowService:
                 try:
                     reserved = self.vpn_service.reserve_vpn_profile(
                         vpn.get('filename'), 
-                        f"job:{job_id}",  # ✅ Sửa từ subjob:workflow-id thành job:job-id
+                        job_id,  # ✅ Chỉ dùng job_id, bỏ prefix "job:"
                         settings.VPN_RESERVATION_TTL, 
                         self.db
                     )
